@@ -1,0 +1,48 @@
+# The application image builds from the repository root (it needs uv.lock, the
+# root pyproject.toml, and every workspace member), so the context must be
+# trimmed aggressively or every build ships the whole checkout.
+
+.git/
+.github/
+
+# Host artefacts — never valid inside an image, and .venv in particular would
+# smuggle macOS binaries into a Linux build.
+.venv/
+venv/
+node_modules/
+.next/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets must never enter the build context: anything copied in is recoverable
+# from the image layers even if a later step deletes it.
+.env
+.env.*
+
+# Documentation and planning carry no runtime value.
+docs/
+*.md
+!README.md
+
+# Other containers' build inputs. apps/frontend is NOT excluded: the frontend
+# image builds from this same repo-root context (docker/frontend/Dockerfile).
+docker/nginx/
+docker/tooling/
+docker/compose/
+
+# Local media scratch.
+/tmp/
+/scratch/
+*.mp4
+*.mov
+
+.DS_Store
+.idea/
+.vscode/

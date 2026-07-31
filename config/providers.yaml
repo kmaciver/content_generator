@@ -1,0 +1,37 @@
+# Provider selection (SADD §15.3).
+#
+# One optional layer in the settings resolution:
+#
+#     code defaults  →  THIS FILE  →  environment
+#
+# i.e. anything set here beats the built-in defaults, and any PROVIDERS__* env
+# var beats this file. Delete the file entirely and the stack still boots on
+# defaults (mock everything).
+#
+# NO SECRETS IN THIS FILE — it is tracked in git. API keys come exclusively
+# from environment variables (OPENAI_API_KEY, ANTHROPIC_API_KEY, …), and
+# compose supplies those to worker containers only (NF8).
+#
+# Path is overridable with PROVIDERS_CONFIG_FILE; relative paths resolve
+# against the process working directory (/app in containers).
+
+# mock — no network, deterministic fixtures (default; what CI uses)
+# real — live provider calls; costs money
+# record / replay — fixture capture and playback for integration tests
+mode: mock
+
+llm:
+  adapter: mock          # mock | anthropic | openai   (adapters land in M1/M2)
+  model: ""
+  timeout_s: 120
+
+image:
+  adapter: mock          # mock | stability | openai   (adapters land in M3)
+  model: ""
+
+# Word-level timestamps are a hard requirement for any voice adapter (B3/S5):
+# scene boundaries and karaoke captions both derive from them. An adapter that
+# cannot supply them fails the contract test at configuration time.
+voice:
+  adapter: mock          # mock | elevenlabs | openai  (adapters land in M3)
+  voice_id: ""

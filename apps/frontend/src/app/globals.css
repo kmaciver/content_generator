@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Design tokens (SADD §20).
+ *
+ * Named by ROLE, not by value — `--color-state-ok`, never `--color-green`.
+ * The pipeline rail, artifact-state chips, and (in M4) caption-style previews
+ * all key off artifact state, so the vocabulary is defined once here and the
+ * whole UI stays consistent as screens are added.
+ *
+ * The state palette below mirrors the artifact lifecycle (SADD §12.2), which
+ * is the single most repeated visual concept in this product. */
+@theme {
+  --color-surface: oklch(0.16 0.01 260);
+  --color-surface-raised: oklch(0.21 0.012 260);
+  --color-border-subtle: oklch(0.32 0.014 260);
+  --color-ink: oklch(0.95 0.005 260);
+  --color-ink-muted: oklch(0.68 0.012 260);
+
+  /* Artifact lifecycle states */
+  --color-state-pending: oklch(0.62 0.02 260);
+  --color-state-generating: oklch(0.72 0.15 240);
+  --color-state-review: oklch(0.78 0.15 85);
+  --color-state-ok: oklch(0.72 0.16 155);
+  --color-state-failed: oklch(0.65 0.2 25);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}

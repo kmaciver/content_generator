@@ -1,0 +1,343 @@
+# ============================================================================
+# VideoForge — base topology.
+#
+# Shared by both profiles. `compose.dev.yml` and `compose.prod.yml` layer the
+# differences on top; SADD §8 anticipates exactly this, with the Makefile
+# hiding the -f chain (`make up`, `make up-prod`).
+#
+# All relative paths resolve against the REPOSITORY ROOT, because the Makefile
+# passes --project-directory. Do not run `docker compose` from this directory
+# without it.
+#
+# Every setting has a working local default, so the stack boots on a clean
+# machine with no .env at all (NF1). A .env at the repo root overrides them and
+# is required before any real provider key is used.
+# ============================================================================
+name: videoforge
+
+# --------------------------------------------------------------------------- #
+# Shared fragments
+# --------------------------------------------------------------------------- #
+
+# One image, many roles (SADD §9.1, built in M0-02). Every Python service below
+# is this same image with a different command.
+x-app-image: &app-image
+  build:
+    context: .
+    dockerfile: docker/app/Dockerfile
+  image: videoforge-app:local
+
+# Non-secret configuration common to every Python service.
+#
+# Provider API keys are deliberately NOT here -- see the worker services, which
+# are the only ones that receive them (NF8, SADD §21.3).
+x-app-env: &app-env
+  ENVIRONMENT: "${ENVIRONMENT:-development}"
+  LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+  LOG_FORMAT: "${LOG_FORMAT:-json}"
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "${POSTGRES_USER:-videoforge}"
+  POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-videoforge-dev}"
+  POSTGRES_DB: "${POSTGRES_DB:-videoforge}"
+  REDIS_URL: "redis://redis:6379/0"
+  CELERY_BROKER_URL: "redis://redis:6379/1"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/2"
+  MINIO_ENDPOINT: "http://minio:9000"
+  MINIO_ROOT_USER: "${MINIO_ROOT_USER:-videoforge}"
+  MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-videoforge-dev}"
+  MINIO_BUCKET_ARTIFACTS: "${MINIO_BUCKET_ARTIFACTS:-artifacts}"
+  MINIO_BUCKET_ASSETS: "${MINIO_BUCKET_ASSETS:-assets}"
+  MINIO_BUCKET_PACKAGES: "${MINIO_BUCKET_PACKAGES:-packages}"
+  MINIO_BUCKET_TMP_RENDER: "${MINIO_BUCKET_TMP_RENDER:-tmp-render}"
+  API_TOKEN: "${API_TOKEN:-dev-token-change-me}"
+  INTERNAL_HMAC_SECRET: "${INTERNAL_HMAC_SECRET:-dev-hmac-change-me}"
+  DAILY_COST_LIMIT_USD: "${DAILY_COST_LIMIT_USD:-10.00}"
+
+# Provider credentials and selection. Referenced ONLY by the provider-calling
+# workers. Splitting this out is what makes the blast-radius rule mechanically
+# checkable rather than a convention someone has to remember — enforced
+# statically by tests/test_secret_isolation.py and at runtime by
+# `make verify-secrets`.
+x-provider-secrets: &provider-secrets
+  PROVIDERS_CONFIG_FILE: "/app/config/providers.yaml"
+  PROVIDERS__MODE: "${PROVIDERS__MODE:-mock}"
+  PROVIDERS__LLM__ADAPTER: "${PROVIDERS__LLM__ADAPTER:-mock}"
+  PROVIDERS__IMAGE__ADAPTER: "${PROVIDERS__IMAGE__ADAPTER:-mock}"
+  PROVIDERS__VOICE__ADAPTER: "${PROVIDERS__VOICE__ADAPTER:-mock}"
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+  ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY:-}"
+  STABILITY_API_KEY: "${STABILITY_API_KEY:-}"
+
+# The tracked provider-selection file (no secrets in it — see the file header).
+# Mounted only where provider settings are read.
+x-provider-config-mount: &provider-config-mount
+  - ./config:/app/config:ro
+
+# Worker liveness (SADD §9.2): ask this node's own celery instance to answer.
+# -d limits the probe to the local node so one dead worker cannot hide behind a
+# healthy fleet answering the broadcast.
+x-worker-healthcheck: &worker-healthcheck
+  test:
+    ["CMD-SHELL",
+     "celery -A videoforge_workers.celery_app inspect ping -d celery@$$(hostname) -t 10 | grep -q pong"]
+  interval: 30s
+  timeout: 15s
+  retries: 3
+  start_period: 25s
+
+x-depends-on-stores: &depends-on-stores
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  minio-bootstrap:
+    condition: service_completed_successfully
+
+services:
+
+  # ------------------------------------------------------------------------- #
+  # State plane
+  # ------------------------------------------------------------------------- #
+
+  postgres:
+    image: postgres:16.14-bookworm
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-videoforge}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-videoforge-dev}"
+      POSTGRES_DB: "${POSTGRES_DB:-videoforge}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -U/-d matter: without them pg_isready reports the server as ready before
+      # the requested database exists, and the first migration then fails.
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-videoforge} -d ${POSTGRES_DB:-videoforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7.4.10-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-videoforge}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-videoforge-dev}"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  # One-shot. Buckets and lifecycle must exist before anything writes an
+  # artifact, so every consumer waits on service_completed_successfully rather
+  # than merely on minio being healthy.
+  minio-bootstrap:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ENDPOINT: "http://minio:9000"
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-videoforge}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-videoforge-dev}"
+      MINIO_BUCKET_ARTIFACTS: "${MINIO_BUCKET_ARTIFACTS:-artifacts}"
+      MINIO_BUCKET_ASSETS: "${MINIO_BUCKET_ASSETS:-assets}"
+      MINIO_BUCKET_PACKAGES: "${MINIO_BUCKET_PACKAGES:-packages}"
+      MINIO_BUCKET_TMP_RENDER: "${MINIO_BUCKET_TMP_RENDER:-tmp-render}"
+    volumes:
+      - ./docker/minio/bootstrap.sh:/bootstrap.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    restart: "no"
+
+  # ------------------------------------------------------------------------- #
+  # Schema migration — one-shot, runs to completion before the app starts
+  # ------------------------------------------------------------------------- #
+  #
+  # A dedicated service exists so application containers never race each other
+  # to migrate (SADD §7.3). Everything that touches the database waits on this
+  # completing successfully.
+  migrate:
+    <<: *app-image
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+    command:
+      ["alembic", "-c", "/app/database/alembic.ini", "upgrade", "head"]
+    restart: "no"
+
+  # ------------------------------------------------------------------------- #
+  # Control plane
+  # ------------------------------------------------------------------------- #
+
+  backend:
+    <<: *app-image
+    depends_on:
+      <<: *depends-on-stores
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+    volumes:
+      - uwsgi_sock:/run/uwsgi
+    healthcheck:
+      # uWSGI speaks the binary uwsgi protocol on this socket, not HTTP, so a
+      # successful connect() is the honest liveness signal. HTTP-level health is
+      # nginx's job in prod, and the dev override swaps this for a real request.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import socket
+          s = socket.socket(socket.AF_UNIX)
+          s.settimeout(2)
+          s.connect("/run/uwsgi/api.sock")
+          s.close()
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    stop_grace_period: 30s
+
+  # ------------------------------------------------------------------------- #
+  # UI plane
+  # ------------------------------------------------------------------------- #
+  #
+  # The BFF (S6): the browser talks only to this service, which injects the
+  # bearer server-side. It therefore needs API_TOKEN — but NOT provider keys,
+  # and tests/test_secret_isolation.py asserts exactly that.
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend/Dockerfile
+      target: runner
+    image: videoforge-frontend:local
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: "production"
+      BACKEND_INTERNAL_URL: "http://backend:5000"
+      API_TOKEN: "${API_TOKEN:-dev-token-change-me}"
+    healthcheck:
+      test:
+        ["CMD", "node", "-e",
+         "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ------------------------------------------------------------------------- #
+  # Monitoring
+  # ------------------------------------------------------------------------- #
+
+  flower:
+    image: mher/flower:2.0.1
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      CELERY_BROKER_URL: "redis://redis:6379/1"
+      FLOWER_PORT: "5555"
+      FLOWER_UNAUTHENTICATED_API: "true"
+    command: ["celery", "flower", "--broker=redis://redis:6379/1", "--port=5555"]
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+
+  # ------------------------------------------------------------------------- #
+  # Execution plane
+  # ------------------------------------------------------------------------- #
+  #
+  # Queue split per SADD §14.1: slow media work must never starve cheap LLM
+  # calls, so separate containers with separate concurrency — not one worker
+  # subscribed to everything. All run `videoforge_workers.celery_app`.
+
+  worker-llm:
+    <<: *app-image
+    healthcheck: *worker-healthcheck
+    depends_on: *depends-on-stores
+    environment:
+      <<: [*app-env, *provider-secrets]
+    volumes: *provider-config-mount
+    command:
+      ["celery", "-A", "videoforge_workers.celery_app", "worker",
+       "-Q", "llm", "--concurrency", "4", "--prefetch-multiplier", "1"]
+
+  worker-media:
+    <<: *app-image
+    healthcheck: *worker-healthcheck
+    depends_on: *depends-on-stores
+    environment:
+      <<: [*app-env, *provider-secrets]
+    volumes: *provider-config-mount
+    command:
+      ["celery", "-A", "videoforge_workers.celery_app", "worker",
+       "-Q", "image,voice", "--concurrency", "2", "--prefetch-multiplier", "1"]
+
+  worker-core:
+    <<: *app-image
+    healthcheck: *worker-healthcheck
+    depends_on: *depends-on-stores
+    environment:
+      <<: [*app-env, *provider-secrets]
+    volumes: *provider-config-mount
+    command:
+      ["celery", "-A", "videoforge_workers.celery_app", "worker",
+       "-Q", "timeline,package,events", "--concurrency", "2",
+       "--prefetch-multiplier", "1"]
+
+  # Render is a normal Celery worker (D4): FFmpeg in-process, no Node service,
+  # no Redis Streams, no callback endpoint. It gets its own container purely so
+  # encoding cannot starve the other queues on a laptop.
+  worker-render:
+    <<: *app-image
+    healthcheck: *worker-healthcheck
+    depends_on: *depends-on-stores
+    environment:
+      <<: *app-env
+    command:
+      ["celery", "-A", "videoforge_workers.celery_app", "worker",
+       "-Q", "render", "--concurrency", "1", "--prefetch-multiplier", "1"]
+    cpus: 2.0
+    mem_limit: 2g
+
+  # Separate, single-instance, and never scaled (B6). Running beat inside a
+  # worker means `--scale` silently produces two schedulers, which drains the
+  # outbox twice per tick and races the reconciler against itself.
+  beat:
+    <<: *app-image
+    depends_on: *depends-on-stores
+    environment:
+      <<: *app-env
+    command:
+      ["celery", "-A", "videoforge_workers.celery_app", "beat",
+       "--loglevel", "INFO", "-s", "/tmp/celerybeat-schedule"]
+    deploy:
+      replicas: 1
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  uwsgi_sock:

@@ -1,0 +1,159 @@
+name: CI
+
+# Ordering mirrors SADD §22: cheap gates first, the full stack last, so the
+# common failure is reported in ~2 minutes rather than after a stack boot.
+#
+# Everything runs offline. PROVIDERS__MODE defaults to `mock`, so no job here
+# can reach a provider API, spend money, or fail because a vendor is down (NF7).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+
+# A new push supersedes the previous run on the same ref. `main` is excluded
+# from cancellation so the post-merge signal always completes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The tooling image IS the toolchain (NF1): CI installs no Python,
+      # no uv, no linters. Identical versions locally and here, by
+      # construction rather than by two lists kept in sync.
+      - name: Build tooling image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/tooling
+          load: true
+          tags: videoforge-tooling:local
+          cache-from: type=gha,scope=tooling
+          cache-to: type=gha,mode=max,scope=tooling
+
+      # Fails if uv.lock disagrees with the manifests — the same --frozen
+      # guarantee the runtime image relies on.
+      - name: Verify lockfile is current
+        run: |
+          docker run --rm -v "$PWD":/w -w /w videoforge-tooling:local \
+            uv lock --check
+
+      - name: Lint (ruff)
+        run: make lint
+
+      - name: Format check (black, isort)
+        run: make fmt-check
+
+      - name: Type check (mypy strict)
+        run: make typecheck
+
+      - name: Unit and structural tests
+        run: make test
+
+  frontend:
+    name: Frontend gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build frontend dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/frontend/Dockerfile
+          target: dev
+          load: true
+          tags: videoforge-frontend-dev:local
+          cache-from: type=gha,scope=frontend-dev
+          cache-to: type=gha,mode=min,scope=frontend-dev
+
+      - name: Lint (eslint)
+        run: make lint-js
+
+      - name: Type check (tsc)
+        run: make typecheck-js
+
+      - name: Format check (prettier)
+        run: make fmt-check-js
+
+  exit-test:
+    name: M0 exit test (production-local)
+    needs: [python, frontend]
+    runs-on: ubuntu-latest
+    # Generous: a cold run compiles uWSGI and installs ffmpeg. Warm runs are
+    # far quicker thanks to the layer cache below.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Runners ship ~14GB free and this stack pulls several large images
+      # (ffmpeg alone is ~400MB of layers). Reclaim the preinstalled toolchains
+      # we do not use rather than debug an opaque ENOSPC mid-render.
+      - name: Reclaim runner disk
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h / | tail -1
+
+      # Prime the buildx cache so compose's own build is a cache hit rather
+      # than a cold rebuild of uWSGI and ffmpeg.
+      - name: Build application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/app/Dockerfile
+          load: true
+          tags: videoforge-app:local
+          cache-from: type=gha,scope=app
+          # mode=min, not max: the app image is ~950MB and GitHub's cache is
+          # capped at 10GB per repo. Caching every intermediate layer across
+          # three scopes evicts itself and makes builds permanently cold.
+          cache-to: type=gha,mode=min,scope=app
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/frontend/Dockerfile
+          target: runner
+          load: true
+          tags: videoforge-frontend:local
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=min,scope=frontend
+
+      # The whole of M0 in one assertion: healthchecks, migrations, every
+      # queue round-tripping, a real FFmpeg render landing in MinIO, asset
+      # serving with Range and immutable caching, the UI, the BFF, and NF8.
+      # Byte-identical to what `make exit-test` runs on a laptop.
+      - name: M0 exit test
+        run: make exit-test
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          docker compose --project-directory . \
+            -f docker/compose/docker-compose.yml \
+            -f docker/compose/compose.prod.yml ps -a || true
+          docker compose --project-directory . \
+            -f docker/compose/docker-compose.yml \
+            -f docker/compose/compose.prod.yml logs --tail 120 || true

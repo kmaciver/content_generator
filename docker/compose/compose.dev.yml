@@ -1,0 +1,103 @@
+# ============================================================================
+# development profile  —  `make up`
+#
+# Optimised for the edit/reload loop (SADD §9.3):
+#   * no nginx; the API is reached directly on :5000
+#   * Flask's reloader instead of uWSGI, so a save is visible immediately
+#   * source bind-mounted over the image copy
+#   * store ports published, so psql / redis-cli / the MinIO console work
+#   * human-readable logs
+#
+# The deliberate trade is fidelity: uWSGI, the unix socket, and nginx are NOT
+# exercised here. `make up-prod` is what validates those, and CI runs that
+# profile for exactly this reason.
+# ============================================================================
+
+services:
+
+  postgres:
+    ports:
+      - "${POSTGRES_PORT_HOST:-5432}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_PORT_HOST:-6379}:6379"
+
+  minio:
+    ports:
+      - "${MINIO_PORT_HOST:-9000}:9000"      # S3 API
+      - "${MINIO_CONSOLE_PORT_HOST:-9001}:9001"  # web console
+
+  backend:
+    environment:
+      LOG_FORMAT: "pretty"
+      FLASK_APP: "videoforge.wsgi:app"
+      FLASK_DEBUG: "1"
+    # Editable installs point at /app/apps/... and /app/packages/..., so
+    # mounting the host tree over them is all the hot reload that is needed.
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+    # 5010, not the conventional 5000: macOS Control Center (AirPlay Receiver)
+    # holds :5000 from Monterey onward, and 500x is crowded by other local
+    # projects. Overridable via BACKEND_PORT_HOST.
+    ports:
+      - "${BACKEND_PORT_HOST:-5010}:5000"
+    command:
+      ["flask", "--app", "videoforge.wsgi:app", "run",
+       "--host", "0.0.0.0", "--port", "5000", "--debug"]
+    # The base healthcheck probes the uWSGI socket, which does not exist under
+    # the dev server. Probe the real endpoint instead.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request
+          urllib.request.urlopen("http://127.0.0.1:5000/api/v1/health", timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  frontend:
+    build:
+      target: dev
+    environment:
+      NODE_ENV: "development"
+    # Source bind-mounted for reload; node_modules stays the image's copy —
+    # an anonymous volume shadows the mount so the host's (absent, or
+    # wrong-platform) node_modules never wins.
+    volumes:
+      - ./apps/frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "${FRONTEND_PORT_HOST:-3000}:3000"
+    command: ["npm", "run", "dev"]
+
+  worker-llm:
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+
+  worker-media:
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+
+  worker-core:
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+
+  worker-render:
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages
+
+  beat:
+    volumes:
+      - ./apps:/app/apps
+      - ./packages:/app/packages

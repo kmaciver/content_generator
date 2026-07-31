@@ -1,0 +1,145 @@
+# Workspace root.
+#
+# This is a *virtual* root: it is not itself an installable package. It exists to
+# declare the uv workspace and to hold the single source of truth for tool
+# configuration, so that every app and package is linted, formatted, and
+# type-checked identically.
+#
+# Dependency rule (SADD 8): the arrow always points apps -> packages, never
+# sideways between apps. `videoforge-backend` and `videoforge-workers` may both
+# depend on anything under packages/; neither may depend on the other. That is a
+# convention here, not something uv enforces -- code review is the enforcement.
+
+[tool.uv.workspace]
+members = [
+    "apps/backend",
+    "apps/workers",
+    "packages/*",
+]
+
+# Workspace members resolve to the local checkout rather than PyPI.
+[tool.uv.sources]
+videoforge-shared = { workspace = true }
+videoforge-persistence = { workspace = true }
+videoforge-providers = { workspace = true }
+videoforge-prompts = { workspace = true }
+videoforge-timeline = { workspace = true }
+
+[dependency-groups]
+# Installed into the workspace env for linting/testing, never into runtime images.
+# `dev` is uv's default group, so a bare `uv sync` picks it up.
+dev = [
+    "ruff==0.16.1",
+    "black==26.5.1",
+    "isort==8.0.1",
+    "mypy==2.3.0",
+    "pytest==9.1.1",
+    # Stubs for the compose-parsing tests and the providers.yaml layer.
+    "types-PyYAML==6.0.12.20260724",
+    # Typed S3 client for mypy strict; runtime code never imports these.
+    "boto3-stubs[s3]==1.43.60",
+    # Celery ships untyped decorators; stubs keep @app.task usable under strict.
+    "celery-types==0.26.0",
+]
+
+# Deployment-only. Deliberately NOT a dependency of videoforge-backend and not in
+# a default group, so `uv sync` on a developer machine never triggers a uWSGI
+# compile (it is sdist-only and needs PCRE + a C toolchain). The runtime image
+# opts in explicitly with `--group deploy`.
+#
+# Keeping it here rather than as a loose `pip install` in the Dockerfile means
+# the version ADR-002 verified is recorded in uv.lock like everything else.
+deploy = [
+    "uWSGI==2.0.31",
+]
+
+# --------------------------------------------------------------------------- #
+# Formatting and linting
+# --------------------------------------------------------------------------- #
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = [
+    "videoforge",
+    "videoforge_workers",
+    "videoforge_shared",
+    "videoforge_persistence",
+    "videoforge_providers",
+    "videoforge_prompts",
+    "videoforge_timeline",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = [
+    "apps/backend/src",
+    "apps/workers/src",
+    "packages/shared/src",
+    "packages/persistence/src",
+    "packages/providers/src",
+    "packages/prompts/src",
+    "packages/timeline/src",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.lint.isort]
+# Kept deliberately consistent with [tool.isort] above; if these two disagree,
+# `make fmt` and `make lint` will fight each other forever.
+known-first-party = [
+    "videoforge",
+    "videoforge_workers",
+    "videoforge_shared",
+    "videoforge_persistence",
+    "videoforge_providers",
+    "videoforge_prompts",
+    "videoforge_timeline",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are allowed to be long and descriptive rather than conventional.
+"**/tests/**" = ["N802", "N803"]
+
+# --------------------------------------------------------------------------- #
+# Type checking
+# --------------------------------------------------------------------------- #
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+# Namespace packages + explicit bases keep the src/ layout unambiguous across
+# six separate distributions sharing one mypy run.
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = [
+    "apps/backend/src",
+    "apps/workers/src",
+    "packages/shared/src",
+    "packages/persistence/src",
+    "packages/providers/src",
+    "packages/prompts/src",
+    "packages/timeline/src",
+]
+
+# (An override for the `uwsgi` C module lived here until M0-06 removed the
+# spike's conditional import; nothing imports uwsgi from Python anymore.)
+
+# --------------------------------------------------------------------------- #
+# Tests
+# --------------------------------------------------------------------------- #
+
+[tool.pytest.ini_options]
+# Unit tests live beside the code they cover; tests/ at the root is reserved for
+# cross-cutting integration and e2e (SADD 8).
+testpaths = ["apps", "packages", "tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"

@@ -1,0 +1,45 @@
+# Optional convenience hooks.
+#
+# These are NOT the source of truth for quality gates -- `make check` is, and it
+# runs the same tool versions in Docker (NF1). pre-commit is a host-side
+# nicety for people who want fast feedback before committing; CI does not
+# depend on it, and nothing breaks if it is never installed.
+#
+# Versions here are pinned to match pyproject.toml's dev group. If you bump one,
+# bump both, or local and CI formatting will silently disagree.
+#
+# Install with:  make hooks
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # Generated media belongs in MinIO, never in git.
+        args: ["--maxkb=1024"]
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+
+  - repo: https://github.com/pycqa/isort
+    rev: 8.0.1
+    hooks:
+      - id: isort
+
+  - repo: https://github.com/psf/black
+    rev: 26.5.1
+    hooks:
+      - id: black
+
+# mypy is deliberately absent: under strict mode it needs the full resolved
+# environment, which lives in the tooling container. Running it here against a
+# host interpreter would produce different results than CI. Use `make typecheck`.

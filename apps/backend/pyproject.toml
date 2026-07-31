@@ -1,0 +1,22 @@
+[project]
+name = "videoforge-backend"
+version = "0.1.0"
+description = "Flask API — the control plane. Creates jobs and reads state; never generates."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "Flask==3.1.3",
+    "videoforge-shared",
+    "videoforge-persistence",
+]
+
+# uWSGI is deliberately NOT a project dependency. It is a deployment concern
+# installed in the runtime image (see apps/backend/Dockerfile and ADR-002);
+# putting it here would force a C compile on every developer's machine and on
+# every test run.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/videoforge"]

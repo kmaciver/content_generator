@@ -1,0 +1,73 @@
+# ============================================================================
+# production-local profile  —  `make up-prod`
+#
+# The fidelity loop (SADD §9.3). Same images and same topology as development,
+# but exercising the parts the dev profile skips:
+#   * nginx is the ONLY entry point; no store or app port is published
+#   * uWSGI over the unix socket, not the Flask dev server
+#   * no source bind-mounts — the image is the artifact
+#   * JSON logs, restart policies, resource limits
+#
+# CI runs this profile precisely because "works in dev" must predict "works in
+# prod-local", and the two differ exactly where it is cheap to be wrong.
+# ============================================================================
+
+services:
+
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  minio:
+    restart: unless-stopped
+
+  backend:
+    restart: unless-stopped
+    # No `command` override: the image default is already
+    # `uwsgi --ini /app/apps/backend/uwsgi/api.ini` (M0-02), and the base
+    # healthcheck already probes the socket. Nothing to change is the point.
+
+  flower:
+    restart: unless-stopped
+
+  frontend:
+    restart: unless-stopped
+
+  # Only entry point. Defined here rather than in the base file because the
+  # development profile deliberately has no proxy in front of the API.
+  nginx:
+    build:
+      context: docker/nginx
+    image: videoforge-nginx:local
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    volumes:
+      - uwsgi_sock:/run/uwsgi:ro
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  worker-llm:
+    restart: unless-stopped
+
+  worker-media:
+    restart: unless-stopped
+
+  worker-core:
+    restart: unless-stopped
+
+  worker-render:
+    restart: unless-stopped
+
+  beat:
+    restart: unless-stopped

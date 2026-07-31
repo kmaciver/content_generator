@@ -1,0 +1,20 @@
+[project]
+name = "videoforge-persistence"
+version = "0.1.0"
+description = "SQLAlchemy base, engine factories, and (from M1) the ORM models and repositories."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "SQLAlchemy==2.0.51",
+    "alembic==1.18.5",
+    # psycopg3, binary build: sync today (Flask + Celery prefork are both
+    # synchronous); the same driver serves async later if anything needs it.
+    "psycopg[binary]==3.3.4",
+    "videoforge-shared",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/videoforge_persistence"]

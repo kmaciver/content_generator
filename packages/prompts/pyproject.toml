@@ -1,0 +1,13 @@
+[project]
+name = "videoforge-prompts"
+version = "0.1.0"
+description = "Versioned prompt templates. Prompt text is a behavioural input, so it is versioned like code."
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/videoforge_prompts"]

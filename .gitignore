@@ -1,0 +1,49 @@
+# Secrets — never commit. .env.example is the tracked template.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# pyenv: local interpreter selection is personal (it usually names a virtualenv
+# that only exists on one machine). The authoritative pin is requires-python in
+# every pyproject.toml, plus the container base image in ADR-002.
+.python-version
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# uv.lock IS tracked deliberately: reproducible builds depend on it.
+# (listed here only to document the intent, not to ignore it)
+
+# Node / frontend
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Generated media and local scratch. Real artefacts live in MinIO, never on disk.
+/tmp/
+/scratch/
+*.mp4
+*.mov
+!assets/**/*.mp4
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
