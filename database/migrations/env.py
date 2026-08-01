@@ -11,11 +11,18 @@ whatever the environment says with no second source of truth.
 
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import create_engine, pool
 
+# Imported for the side effect of registering every model on ``Base.metadata``
+# — autogenerate compares that against the live database, so an unimported
+# model module is a table Alembic believes should be DROPPED. Importing the
+# package namespace (rather than each module) means adding a model in M2 needs
+# no edit here, only an entry in ``models/__init__.py``.
+import videoforge_persistence.models  # noqa: E402,F401  (side-effecting import)
 from videoforge_persistence.base import Base
 from videoforge_shared.settings import PostgresSettings
 
@@ -27,6 +34,16 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
+    """Connection URL for migrations.
+
+    ``POSTGRES_URL_OVERRIDE`` exists for the integration harness, which points
+    the migration chain at a throwaway testcontainer. Absent that (i.e. always,
+    in production), the URL comes from the same PostgresSettings every service
+    resolves — one source of truth, no credentials in any ini file.
+    """
+    override = os.environ.get("POSTGRES_URL_OVERRIDE")
+    if override:
+        return override
     return PostgresSettings().sqlalchemy_url
 
 

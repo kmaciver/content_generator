@@ -4,7 +4,7 @@
 - **Date:** 2026-07-30
 - **Deciders:** kmaciver
 - **Supersedes:** the draft ADR-002 sketched in SADD §26
-- **Related:** decision D1 in `IMPLEMENTATION_PLAN.md` §1.4; verified by ticket M0-00
+- **Related:** decision D1 (Python 3.13 vs uWSGI — resolved below); verified by ticket M0-00
 
 ## Context
 

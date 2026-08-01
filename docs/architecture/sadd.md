@@ -6,7 +6,7 @@
 |---|---|
 | **Status** | Approved; amended during M0 |
 | **Version** | 0.2.0 |
-| **Amendments** | See `IMPLEMENTATION_PLAN.md` Part 1 and `docs/adr/`. Decisions D1–D4 and findings B1–B7 / S1–S11 were accepted before implementation; M0 tickets applied them. Amended passages are marked **[AMENDED M0]**. |
+| **Amendments** | An architecture review before implementation raised seven blocking defects and eleven should-fixes; all were accepted and applied during M0. The resulting decisions are recorded in `docs/adr/`. Amended passages below are marked **[AMENDED M0]**. |
 | **Type** | Architecture RFC |
 | **Deployment target** | Local, Docker Compose |
 | **Audience** | Engineering |
@@ -17,7 +17,7 @@
 
 This document proposes the architecture for a local-first, production-grade orchestration platform that generates short-form educational videos (Instagram Reels, TikTok, YouTube Shorts) from a topic prompt. The platform composes videos from AI-generated *illustrations*, AI narration, subtitles, and background music — deliberately avoiding AI video generation in v1 for cost, quality control, and determinism.
 
-**[AMENDED M0]** Camera motion (Ken Burns pan/zoom) was removed from scope: videos are still images stitched together with voice-over and captions. See `IMPLEMENTATION_PLAN.md` §1.0.
+**[AMENDED M0]** Camera motion (Ken Burns pan/zoom) was removed from scope: videos are still images stitched together with voice-over and captions. That change is what led to replacing the render engine — see ADR-012.
 
 The system is a **human-in-the-loop pipeline**: a directed workflow of generation stages (research → script → scenes → images → voice → timeline → render → publishing package), where each stage produces **immutable, versioned artifacts** that a human reviews and approves before the workflow advances. Long-running work executes exclusively in Celery workers; the Flask API only creates durable jobs and reads state. Rendering is fully deterministic: a **Timeline JSON** document is compiled from approved artifacts and rendered to MP4 by **FFmpeg, inside an ordinary Celery task** on the `render` queue (**[AMENDED M0 — ADR-012]**; originally Remotion in a dedicated Node container).
 
@@ -197,7 +197,7 @@ S3-compatible, local, presigned-URL capable — makes the eventual cloud move (r
 
 > The original text below chose Remotion in an isolated Node service. Decision
 > **D4** replaced it with FFmpeg inside a Celery task after motion was removed
-> from scope (§1.0 of the plan) and the reference captions proved to be
+> from scope (see the amended §1 above) and the reference captions proved to be
 > single-word sequential display, which ASS renders natively. ADR-012 records
 > the replacement; ADR-005 and ADR-007 are superseded. Retained for context:
 
@@ -230,9 +230,9 @@ Monorepo. One clone = whole system; atomic cross-cutting changes (e.g., timeline
 │   │       ├── api/              # Blueprints, request/response DTO wiring, error handlers
 │   │       ├── dto/              # Pydantic v2 request/response models
 │   │       ├── services/         # Application services (use-cases, transactions)
-│   │       ├── domain/           # Pure domain models, state machines, policies (no I/O)
-│   │       ├── repositories/     # Persistence gateways (SQLAlchemy behind interfaces)
-│   │       ├── orm/              # SQLAlchemy models ONLY (no behavior)
+│   │       ├── domain/           # [AMENDED M1-02 — moved to packages/domain, ADR-015]
+│   │       ├── repositories/     # [AMENDED M1-03 — moved to packages/persistence]
+│   │       ├── orm/              # [AMENDED M0-07 — moved to packages/persistence, ADR-013]
 │   │       ├── events/           # Outbox writer, event types, publisher
 │   │       └── config/           # Pydantic Settings, provider registry wiring
 │   └── workers/                  # Celery app + task modules per stage
@@ -246,10 +246,14 @@ Monorepo. One clone = whole system; atomic cross-cutting changes (e.g., timeline
 │   │                             #  stability, mock/) — importable by backend & workers
 │   ├── prompts/                  # Versioned prompt templates (Jinja2) + rendering helpers
 │   ├── timeline/                 # Timeline compiler: approved artifacts → Timeline JSON
-│   ├── persistence/              # [NEW] SQLAlchemy Base + engine/session factories; ORM
-│   │                             #  models and repositories from M1. Lives here, not in the
-│   │                             #  backend: workers write to the same schema and the apps
-│   │                             #  must not import each other.
+│   ├── persistence/              # SQLAlchemy Base, engine/session factories, the 13 core
+│   │                             #  ORM models (M1-01), and the repositories (M1-03). Lives
+│   │                             #  here, not in the backend: workers write to the same
+│   │                             #  schema and the apps must not import each other.
+│   ├── domain/                   # [NEW M1-02 — ADR-015] Pure workflow rules: artifact FSM,
+│   │                             #  job FSM, ApprovalPolicy. No SQLAlchemy, Flask, Celery,
+│   │                             #  clock, or I/O — workers cause transitions too, so the
+│   │                             #  rules cannot live under the backend.
 │   └── shared/                   # Logging, ids (ULID), hashing, storage client, correlation,
 │                                 #  AND settings — workers need them as much as the API does.
 │                                 #  packages/schemas/ was withdrawn (ADR-008).
@@ -326,7 +330,8 @@ HTTP ──► DTOs (pydantic) ──► Application Services ──► Domain m
 
 - **ORM models** (`orm/`): tables, columns, relationships, constraints. No business methods.
 - **Repositories**: the only code that touches the session. Expose intent (`artifact_versions.latest_for(project, kind)`, `jobs.claim_orphans(older_than)`), return domain objects, own query shape. Unit-of-work: services open one transaction per use case.
-- **Domain models** (`domain/`): dataclasses + the state machines and approval policies. Pure; property-based-testable.
+- **Domain models** (`domain/`): dataclasses + the state machines and approval policies. Pure; property-based-testable. **[AMENDED M1-02 — ADR-015]** These live in `packages/domain`, not under the backend: §12.2's transitions are caused by job success and failure, which happen in workers, and workers must never import the backend. Same contradiction and same resolution as the data layer (ADR-013).
+  Repositories return **ORM models** rather than separate domain entities — `videoforge_domain` holds *rules*, not entities, so there is nothing to map to. The property that matters, ORM objects never reaching the API, is enforced at the DTO boundary instead.
 - **DTOs** (`dto/`): Pydantic v2 request/response shapes; OpenAPI generated from them. DTOs never leak ORM objects.
 - **Services**: orchestration — validate phase, write job + outbox atomically, enqueue, record audit.
 
@@ -432,6 +437,28 @@ A monolithic project FSM with states like `Images Awaiting Approval` cannot expr
  Any non-approved sibling version when another is approved: SUPERSEDED
  Approved artifact later replaced (re-approval of newer version): previous → SUPERSEDED
 ```
+
+**[AMENDED M1-01]** The SUPERSEDED rule above is too broad as written, and the
+`artifact_version_status` view (finding B1) implements a narrowed form. Read
+literally, *every* non-approved sibling becomes SUPERSEDED the moment any
+version is approved — including a version created **after** the approval.
+That is the regenerate-after-approve case, which is ordinary: approve v2, ask
+for another take, get v3. Under the literal rule v3 is instantly SUPERSEDED, so
+the review UI renders the one version awaiting a human decision as obsolete and
+nobody looks at it.
+
+The view therefore restricts SUPERSEDED to versions the approval has genuinely
+moved *past*:
+
+- `APPROVED` — holds the artifact's most recent APPROVE decision.
+- `REJECTED` — its own latest decision is REJECT. Ranked above SUPERSEDED so an
+  explicit human "no" is never relabelled as merely outdated.
+- `SUPERSEDED` — **older** than the standing approval, or previously approved
+  and since replaced (the §12.5 rollback).
+- `AWAITING_APPROVAL` — everything else, including any version newer than the
+  standing approval.
+
+Covered by `tests/test_schema.py::TestArtifactVersionStatusView`.
 
 Transitions are caused only by: job success/failure, review decision, human edit (jumps PENDING→AWAITING_APPROVAL with origin=human_edit), or reconciler (RUNNING job orphaned → artifact back to FAILED-retryable). Every transition writes `state_transition`.
 
@@ -840,6 +867,7 @@ ADRs live in `docs/adr` (MADR format); the following are drafted with this docum
 | 012 | **FFmpeg rendering inside a Celery task** (decision D4) | Accepted; supersedes 005 and 007 |
 | 013 | Settings and data layer in `packages/`, not the backend | Accepted |
 | 014 | Containerised toolchain; the host needs only Docker | Accepted |
+| 015 | Workflow rules in `packages/domain`, not the backend | Accepted |
 
 ## 27. Implementation Roadmap
 
@@ -847,7 +875,7 @@ Vertical slices; each milestone ships working, tested software; **no milestone s
 
 **M0 — Foundation — ✅ COMPLETE (14 tickets).** Monorepo per §8 (amended); Docker Compose with both profiles; Nginx + uWSGI over unix sockets; Flask app factory with RFC-9457 errors, correlation middleware, `/health` + `/health/deep`; Postgres + Alembic baseline + migrate service; Redis with AOF; MinIO + bucket bootstrap; Celery with seven queues, task skeleton, ping tasks, beat, Flower; **[AMENDED M0]** an FFmpeg render task (not a Remotion container) producing `hello.mp4` in MinIO; layered Pydantic Settings; structured JSON logging with request-id propagation; Next.js UI with a BFF; nginx asset serving via X-Accel-Redirect; CI.
 
-**Exit test — executable and passing:** `make exit-test` runs 22 assertions (services healthy, migrations applied, all seven queues round-tripping, a real render landing in MinIO, asset serving with byte ranges, UI, BFF, and NF8 secret isolation). CI runs the identical command. See `IMPLEMENTATION_PLAN.md` for per-ticket results.
+**Exit test — executable and passing:** `make exit-test` runs 22 assertions (services healthy, migrations applied, all seven queues round-tripping, a real render landing in MinIO, asset serving with byte ranges, UI, BFF, and NF8 secret isolation). CI runs the identical command.
 
 **M1 — Domain spine + first vertical slice (Script).** Core schema (workspace/user/series/project/artifact/version/job/transition/audit/outbox/usage) + immutability triggers; job service + idempotency; outbox → SSE/polling; **mock LLM provider**; script generate → review screen (approve/reject/regenerate/edit/comment/versions/diff) end-to-end in the UI. Exit: e2e test drives topic→approved script with mock provider.
 
@@ -855,7 +883,7 @@ Vertical slices; each milestone ships working, tested software; **no milestone s
 
 **M3 — Media generation.** Image fan-out per scene + grid review UI; voice + timestamps (+alignment fallback) + karaoke review player; parallel media phase; provider usage/cost surfaces.
 
-**M4 — Timeline + render. [AMENDED M0]** Timeline compiler (golden JSON tests; no motion block — §1.0 of the plan); FFmpeg composition work — ASS caption generation from word timestamps, `xfade` transitions, baked audio-ducking envelope (finding S3), music selection (finding S4); MP4 review screen on the asset path already proven in M0-10. No render stream, no callback, no reconciliation — rendering is a normal Celery task (ADR-012). Golden-frame tests by extracting frames with ffmpeg. Also here: the **renderer-neutrality rule** — the timeline schema must not acquire concepts only one engine can express, which is what keeps ADR-012 reversible.
+**M4 — Timeline + render. [AMENDED M0]** Timeline compiler (golden JSON tests; no motion block, per the scope amendment in §1); FFmpeg composition work — ASS caption generation from word timestamps, `xfade` transitions, baked audio-ducking envelope (finding S3), music selection (finding S4); MP4 review screen on the asset path already proven in M0-10. No render stream, no callback, no reconciliation — rendering is a normal Celery task (ADR-012). Golden-frame tests by extracting frames with ffmpeg. Also here: the **renderer-neutrality rule** — the timeline schema must not acquire concepts only one engine can express, which is what keeps ADR-012 reversible.
 
 **M5 — Packaging + polish.** Caption/hashtag generation; zip assembly + download; dashboard/pipeline rail; retries UI; runbook; cost caps; seed demo content.
 

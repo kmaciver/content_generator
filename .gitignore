@@ -42,6 +42,13 @@ out/
 *.mov
 !assets/**/*.mp4
 
+# Working material, deliberately not published. The durable decisions live in
+# docs/adr/ and the amended SADD; this is the day-to-day planning surface.
+IMPLEMENTATION_PLAN.md
+
+# graphify knowledge-graph output (regenerable from the corpus)
+graphify-out/
+
 # Editors / OS
 .DS_Store
 .idea/

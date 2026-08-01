@@ -1,0 +1,177 @@
+"""Artifact identity and artifact content — the distinction the whole app turns on.
+
+SADD §10.3 rule 1: **Artifact = identity; ArtifactVersion = content.** Approval,
+rejection, and comments attach to a *version*. The artifact row tracks lifecycle
+state and a version counter, nothing else. Get this wrong and "show me how the
+script evolved" becomes unanswerable.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from videoforge_persistence.base import Base
+from videoforge_persistence.columns import (
+    TimestampType,
+    ULIDType,
+    created_at_col,
+    jsonb_col,
+    ulid_pk,
+    updated_at_col,
+)
+from videoforge_persistence.enum_types import (
+    ARTIFACT_KIND,
+    ARTIFACT_STATE,
+    VERSION_ORIGIN,
+)
+from videoforge_shared.enums import ArtifactKind, ArtifactState, VersionOrigin
+
+
+class Artifact(Base):
+    """The identity of one output slot in a project — "this project's script".
+
+    Mutable by design: ``state`` and ``current_version_no`` move as the
+    pipeline runs. Everything *content*-shaped lives in
+    :class:`ArtifactVersion`, which is append-only.
+    """
+
+    __tablename__ = "artifact"
+
+    id: Mapped[str] = ulid_pk()
+    project_id: Mapped[str] = mapped_column(
+        ULIDType, sa.ForeignKey("video_project.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[ArtifactKind] = mapped_column(ARTIFACT_KIND, nullable=False)
+    #: Which scene this artifact belongs to, for the per-scene kinds (image,
+    #: prompt, voice). NULL for project-wide kinds (script, timeline, render).
+    #:
+    #: **No foreign key yet.** ``scene`` is an M2 table (SADD §10.2's "thin
+    #: typed extensions"); the FK to ``scene.id`` is added by the migration
+    #: that creates it. The column ships now because finding S1's unique
+    #: constraint below is part of M1 and cannot be expressed without it.
+    scene_ref: Mapped[str | None] = mapped_column(ULIDType, nullable=True)
+    state: Mapped[ArtifactState] = mapped_column(
+        ARTIFACT_STATE, nullable=False, default=ArtifactState.PENDING
+    )
+    #: Monotonic counter for this artifact's versions. The authoritative
+    #: uniqueness guarantee is ``uq_artifact_version_artifact_id_version_no``;
+    #: this is the allocator's cursor, not the truth.
+    current_version_no: Mapped[int] = mapped_column(
+        sa.Integer, nullable=False, default=0, server_default=sa.text("0")
+    )
+    #: **Finding S2.** When a *downstream* dependency was invalidated — e.g. a
+    #: new script version was approved after these images existed. A nullable
+    #: timestamp rather than a boolean, because the UI's question is "stale
+    #: since when?", and a boolean cannot answer it. NULL means current.
+    stale_since: Mapped[datetime | None] = mapped_column(TimestampType, nullable=True)
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = updated_at_col()
+
+    __table_args__ = (
+        # **Finding S1.** Without this, nothing stops a project growing two
+        # `script` artifacts, at which point `active_pointers["script"]` is
+        # ambiguous and the reviewer sees whichever one the query happened to
+        # order first.
+        #
+        # NULLS NOT DISTINCT is the whole point (Postgres 15+, we run 16):
+        # under default NULLS DISTINCT semantics every project-wide artifact
+        # has scene_ref = NULL, and NULL != NULL, so the constraint would
+        # permit exactly the duplicates it exists to prevent — while looking
+        # correct in the schema dump.
+        sa.UniqueConstraint(
+            "project_id",
+            "kind",
+            "scene_ref",
+            postgresql_nulls_not_distinct=True,
+        ),
+        sa.Index("ix_artifact_project_id_state", "project_id", "state"),
+        # Partial index: the staleness cascade (§12.4) only ever asks for the
+        # stale ones, and they are the rare case.
+        sa.Index(
+            "ix_artifact_stale_since",
+            "stale_since",
+            postgresql_where=sa.text("stale_since IS NOT NULL"),
+        ),
+    )
+
+
+class ArtifactVersion(Base):
+    """One immutable snapshot of an artifact's content.
+
+    **Append-only, enforced in the database.** A trigger raises on UPDATE (see
+    ``sql.py``), which is what makes the reproducibility chain of §10.3 rule 4
+    a guarantee rather than a convention: if a render's inputs cannot be
+    edited after the fact, "why does this video look like this?" always has an
+    answer.
+
+    There is deliberately **no status column** (finding B1). ``APPROVED`` /
+    ``REJECTED`` / ``SUPERSEDED`` / ``AWAITING_APPROVAL`` are derived by the
+    ``artifact_version_status`` view from ``review_decision`` rows. The SADD
+    originally said to "mark siblings SUPERSEDED", which is an UPDATE against
+    a table whose trigger forbids UPDATE — unimplementable as written.
+    """
+
+    __tablename__ = "artifact_version"
+
+    id: Mapped[str] = ulid_pk()
+    artifact_id: Mapped[str] = mapped_column(
+        ULIDType, sa.ForeignKey("artifact.id", ondelete="CASCADE"), nullable=False
+    )
+    version_no: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    origin: Mapped[VersionOrigin] = mapped_column(VERSION_ORIGIN, nullable=False)
+    #: The job that produced it. NULL for ``human_edit`` and ``import``.
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ULIDType, sa.ForeignKey("generation_job.id", ondelete="SET NULL"), nullable=True
+    )
+    #: Lineage: the version this one replaces (§10.3 rule 2). Self-referential,
+    #: forming a chain per artifact — "show me how the script evolved".
+    parent_version_id: Mapped[str | None] = mapped_column(
+        ULIDType,
+        sa.ForeignKey("artifact_version.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    #: Where the bytes live in MinIO, for content too large to inline.
+    #: Mutually exclusive with ``inline_content`` — see the CHECK below.
+    storage_key: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    #: sha256 of the content, always present — it is what makes the storage
+    #: layer self-verifying and what the timeline's ``input_snapshot`` pins.
+    content_hash: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    #: Small structured content (a script, a scene list) stored in-row rather
+    #: than round-tripping to object storage for a few kilobytes.
+    inline_content: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    meta: Mapped[dict[str, Any]] = jsonb_col()
+    #: Pins for reproducibility (§10.3 rule 4): which prompt template and
+    #: which provider/model produced this exact content.
+    prompt_template_ref: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    provider_ref: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(
+        ULIDType, sa.ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = created_at_col()
+    # NOTE: no ``updated_at``. Its absence is a claim, and the trigger enforces it.
+
+    __table_args__ = (
+        sa.UniqueConstraint("artifact_id", "version_no"),
+        # Content lives in exactly one place. Allowing both would create two
+        # sources of truth for one hash; allowing neither would create a
+        # version that says nothing.
+        sa.CheckConstraint(
+            "(storage_key IS NULL) <> (inline_content IS NULL)",
+            name="content_in_exactly_one_place",
+        ),
+        sa.CheckConstraint("version_no > 0", name="version_no_positive"),
+        # A version may not be its own parent. Longer cycles are prevented by
+        # construction (a parent always predates its child) rather than here.
+        sa.CheckConstraint(
+            "parent_version_id IS NULL OR parent_version_id <> id",
+            name="parent_is_not_self",
+        ),
+        # No index on (artifact_id, version_no) — the unique constraint above
+        # already creates one, and a duplicate costs writes for nothing.
+        sa.Index("ix_artifact_version_generation_job_id", "generation_job_id"),
+    )

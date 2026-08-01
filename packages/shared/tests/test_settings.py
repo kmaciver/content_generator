@@ -94,6 +94,25 @@ class TestEnvLayer:
         assert keys.openai_api_key is not None
         assert keys.openai_api_key.get_secret_value() == "sk-test-123"
 
+    def test_empty_key_normalises_to_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The condition that actually occurs in a container: compose expands
+        ${OPENAI_API_KEY:-} to "" when the host has no value. Absent and empty
+        must produce the SAME representation, or `is None` lies (M1-00)."""
+        monkeypatch.setenv("OPENAI_API_KEY", "")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+        keys = ProviderKeys()
+        assert keys.openai_api_key is None
+        assert keys.anthropic_api_key is None
+
+    def test_absent_and_empty_agree(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        absent = ProviderKeys().openai_api_key
+        monkeypatch.setenv("OPENAI_API_KEY", "")
+        empty = ProviderKeys().openai_api_key
+        assert absent is empty is None
+
 
 class TestYamlLayer:
     def _write_yaml(self, path: Path, body: str) -> None:

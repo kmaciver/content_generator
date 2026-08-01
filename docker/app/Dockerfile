@@ -55,6 +55,7 @@ COPY apps/backend/pyproject.toml      apps/backend/pyproject.toml
 COPY apps/workers/pyproject.toml      apps/workers/pyproject.toml
 COPY packages/shared/pyproject.toml   packages/shared/pyproject.toml
 COPY packages/persistence/pyproject.toml packages/persistence/pyproject.toml
+COPY packages/domain/pyproject.toml   packages/domain/pyproject.toml
 COPY packages/providers/pyproject.toml packages/providers/pyproject.toml
 COPY packages/prompts/pyproject.toml  packages/prompts/pyproject.toml
 COPY packages/timeline/pyproject.toml packages/timeline/pyproject.toml

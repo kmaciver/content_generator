@@ -31,8 +31,9 @@ from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -214,11 +215,7 @@ class ProviderSettings(BaseSettings):
 
 
 class ProviderKeys(BaseSettings):
-    """Provider API credentials. Environment only, worker containers only.
-
-    ``None`` (unset) and empty string both mean "no key" — compose interpolates
-    ``${OPENAI_API_KEY:-}`` to an empty string when the host has no value.
-    """
+    """Provider API credentials. Environment only, worker containers only."""
 
     model_config = SettingsConfigDict(extra="ignore")
 
@@ -226,6 +223,22 @@ class ProviderKeys(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     elevenlabs_api_key: SecretStr | None = None
     stability_api_key: SecretStr | None = None
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: Any) -> Any:
+        """Normalise "no key" to exactly one representation: ``None``.
+
+        Compose interpolates ``${OPENAI_API_KEY:-}`` to an **empty string**
+        when the host has no value, so in a running container an absent key
+        arrives as ``""`` rather than as a missing variable. Without this,
+        "unset" is ``None`` outside compose but ``SecretStr('')`` inside it —
+        truthiness agrees, but ``is None`` does not, and the registry (M1-06)
+        is exactly where someone writes ``is None``.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class AppSettings(BaseModel):

@@ -21,6 +21,7 @@ members = [
 [tool.uv.sources]
 videoforge-shared = { workspace = true }
 videoforge-persistence = { workspace = true }
+videoforge-domain = { workspace = true }
 videoforge-providers = { workspace = true }
 videoforge-prompts = { workspace = true }
 videoforge-timeline = { workspace = true }
@@ -40,6 +41,9 @@ dev = [
     "boto3-stubs[s3]==1.43.60",
     # Celery ships untyped decorators; stubs keep @app.task usable under strict.
     "celery-types==0.26.0",
+    # Real Postgres for repository/migration tests (SADD §22). Spawns sibling
+    # containers through the mounted docker socket — see the Makefile's TOOL.
+    "testcontainers[postgres]==4.15.0",
 ]
 
 # Deployment-only. Deliberately NOT a dependency of videoforge-backend and not in
@@ -125,6 +129,7 @@ mypy_path = [
     "apps/workers/src",
     "packages/shared/src",
     "packages/persistence/src",
+    "packages/domain/src",
     "packages/providers/src",
     "packages/prompts/src",
     "packages/timeline/src",
@@ -132,6 +137,14 @@ mypy_path = [
 
 # (An override for the `uwsgi` C module lived here until M0-06 removed the
 # spike's conditional import; nothing imports uwsgi from Python anymore.)
+
+[[tool.mypy.overrides]]
+# docker-py's annotations are incomplete (from_env is not visible to mypy).
+# It is a test-only dependency, reached solely by the integration harness's
+# "is a docker socket reachable?" probe — not by any runtime code path.
+module = ["docker", "docker.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 # --------------------------------------------------------------------------- #
 # Tests
@@ -143,3 +156,6 @@ mypy_path = [
 testpaths = ["apps", "packages", "tests"]
 python_files = ["test_*.py"]
 addopts = "-ra --strict-markers"
+markers = [
+    "integration: needs a real Postgres via testcontainers (and a docker socket)",
+]

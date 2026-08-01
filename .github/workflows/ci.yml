@@ -61,8 +61,26 @@ jobs:
       - name: Type check (mypy strict)
         run: make typecheck
 
-      - name: Unit and structural tests
+      # Includes the integration tests, which spawn a real Postgres through
+      # the docker socket (see the Makefile's TOOL). GitHub runners provide
+      # both the socket and host-gateway, so this needs no extra setup — but
+      # if the socket ever became unavailable the harness would SKIP rather
+      # than fail, so assert the integration tests actually ran.
+      - name: Unit, structural and integration tests
         run: make test
+
+      - name: Assert integration tests were not silently skipped
+        run: |
+          docker run --rm -v "$PWD":/w \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --add-host=host.docker.internal:host-gateway \
+            -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+            -e TESTCONTAINERS_RYUK_DISABLED=true \
+            -w /w videoforge-tooling:local \
+            uv run pytest -m integration -q --no-header \
+            | tee /tmp/integration.txt
+          grep -qE "[0-9]+ passed" /tmp/integration.txt
+          ! grep -q "skipped" /tmp/integration.txt
 
   frontend:
     name: Frontend gates

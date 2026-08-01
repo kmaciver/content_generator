@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-31
 - **Deciders:** kmaciver
-- **Related:** finding B4 in `IMPLEMENTATION_PLAN.md`; supersedes SADD §21.5/§23.2's `/assets/` design
+- **Related:** finding B4 (the unworkable presign + `auth_request` combination, described below); supersedes SADD §21.5/§23.2's `/assets/` design
 - **Verified by:** ticket M0-10 (live, all four checks)
 
 ## Context
@@ -33,7 +33,7 @@ Browser ── GET /assets/{bucket}/{content-key}          (stable URL, cacheabl
   MinIO ── validates the SigV4 signature, streams bytes → nginx → browser
 ```
 
-This refines the plan's own B4 sketch one step further: instead of anonymous
+This refines the original B4 remedy one step further: instead of anonymous
 bucket access at the nginx→MinIO hop, **the API presigns internally** and the
 signed query rides only on the internal redirect. Three properties fall out:
 

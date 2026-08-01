@@ -37,6 +37,46 @@ knowing about before you get an unexpected failure:
   including an assertion that the broker visibility timeout exceeds the task
   time limit. Violating that is the duplicate-artifact bug R5 describes.
 
+## Integration tests
+
+Some properties exist only in the database — immutability triggers that must
+*raise*, `UNIQUE NULLS NOT DISTINCT`, optimistic locking, views. Those run
+against a **real PostgreSQL** spawned by testcontainers (SADD §22), pinned to
+the same image the compose stack uses.
+
+```bash
+make test                              # everything, integration included
+# or, inside the tooling container:
+pytest -m integration                  # only these
+pytest -m "not integration"            # skip them (no docker socket needed)
+```
+
+Because tests run inside the tooling container (ADR-014), testcontainers
+spawns Postgres as a **sibling** through the mounted docker socket, not a
+child. The sibling publishes on a *host* port, so the tooling container reaches
+it via `host.docker.internal` — which is why `TOOL` in the Makefile mounts the
+socket, passes `--add-host`, and sets `TESTCONTAINERS_HOST_OVERRIDE`. Ryuk
+(testcontainers' reaper sidecar) is disabled because it assumes it can see the
+containers it reaps, which is not true in a sibling arrangement; the fixture's
+own teardown stops the container.
+
+Without a docker socket the fixtures **skip** rather than fail, so the unit
+suite still runs anywhere. That is convenient and also a hazard — a silent skip
+looks identical to a pass — so CI explicitly asserts the integration tests ran
+and did not skip.
+
+Fixtures live in [`tests/conftest.py`](../tests/conftest.py):
+
+| Fixture | Gives you |
+|---|---|
+| `postgres_url` | empty throwaway database, session-scoped |
+| `migrated_postgres_url` | the same, with the real Alembic chain applied |
+
+`migrated_postgres_url` runs the **actual migrations**, not
+`metadata.create_all()` — the latter never executes the raw-SQL triggers and
+views M1-01 depends on, so it would pass while production's migration path was
+broken.
+
 ## An optional host environment
 
 Nothing requires one — its only value is editor support (autocomplete,

@@ -30,10 +30,32 @@ class TestNamingConvention:
         finally:
             Base.metadata.remove(table)
 
-    def test_metadata_is_empty_before_m1(self) -> None:
-        """M0-07 ships no tables; the baseline migration is empty for the same
-        reason. When M1 adds the schema, this test is deleted alongside."""
-        assert not Base.metadata.tables
+    def test_every_model_is_registered(self) -> None:
+        """Replaces M0-07's ``test_metadata_is_empty_before_m1``, which existed
+        only until there was a schema.
+
+        The inverted assertion is the one that matters now: Alembic compares
+        ``Base.metadata`` against the database, so a model module that nothing
+        imports is a table autogenerate will happily emit a ``DROP TABLE``
+        for. Counting the thirteen core tables (SADD §10.2) means adding a
+        model without wiring it into ``models/__init__.py`` fails here rather
+        than in a migration review.
+        """
+        assert set(Base.metadata.tables) == {
+            "app_user",
+            "artifact",
+            "artifact_version",
+            "audit_event",
+            "comment",
+            "generation_job",
+            "outbox_event",
+            "provider_usage",
+            "review_decision",
+            "series",
+            "state_transition",
+            "video_project",
+            "workspace",
+        }
 
 
 class TestUrls:

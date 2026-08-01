@@ -9,9 +9,11 @@ Human-in-the-loop by design: every stage produces **immutable, versioned
 artifacts** that you review and approve before the pipeline advances. Nothing
 is ever overwritten.
 
-> **Status: M0 complete.** The infrastructure foundation is built, tested, and
-> verified end to end. No business logic yet — the pipeline stages arrive in
-> M1 onward. See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
+> **Status: M0 complete; M1 in progress.** The infrastructure foundation is
+> built, tested, and verified end to end. M1 adds the domain spine: the
+> thirteen core tables with their immutability triggers, the artifact and job
+> state machines, and the repositories. The pipeline stages themselves arrive
+> next. The decisions behind it are recorded in [`docs/adr/`](docs/adr/).
 
 ---
 
@@ -101,8 +103,7 @@ durable job and returns immediately.
 | Document | What it covers |
 |---|---|
 | [Architecture (SADD)](docs/architecture/sadd.md) | The full design, with M0 amendments marked |
-| [Implementation plan](IMPLEMENTATION_PLAN.md) | Review findings, decisions D1–D4, milestone-by-milestone results |
-| [ADRs](docs/adr/) | 14 decision records, including two superseded and one withdrawn |
+| [ADRs](docs/adr/) | 15 decision records, including two superseded and one withdrawn |
 | [Runbook](docs/runbook.md) | Operating it: recovery, diagnosis, routine tasks |
 | [Development](docs/development.md) | Working on it, including an optional host environment |
 | [Environment reference](docs/env-reference.md) | Every configuration variable |
@@ -111,7 +112,7 @@ durable job and returns immediately.
 
 ```
 apps/         backend (Flask API) · workers (Celery) · frontend (Next.js)
-packages/     shared · persistence · providers · prompts · timeline
+packages/     shared · persistence · domain · providers · prompts · timeline
 database/     Alembic migrations and seed data
 docker/       app · frontend · nginx · tooling · compose · redis · minio
 docs/         architecture · adr · api

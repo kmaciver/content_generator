@@ -28,11 +28,19 @@ TOOLING_DIR   := docker/tooling
 # Named volumes keep uv's cache and the project venv out of the bind-mounted
 # repo while still persisting between runs, so repeat invocations are fast and
 # the host checkout stays free of Linux build artefacts.
+# The docker socket lets testcontainers spawn a real Postgres as a SIBLING
+# container (SADD §22). Because that sibling's port is published on the *host*,
+# the tooling container reaches it via host.docker.internal — provided natively
+# by Docker Desktop, and mapped by --add-host on Linux/CI.
 TOOL := docker run --rm \
 	-v "$(CURDIR)":/w \
 	-v videoforge-uv-cache:/opt/uv-cache \
 	-v videoforge-venv:/opt/venv \
 	-v videoforge-tool-caches:/opt/caches \
+	-v /var/run/docker.sock:/var/run/docker.sock \
+	--add-host=host.docker.internal:host-gateway \
+	-e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+	-e TESTCONTAINERS_RYUK_DISABLED=true \
 	-w /w $(TOOLING_IMAGE)
 
 .PHONY: help tooling lock sync lint fmt fmt-check typecheck test check check-all \
