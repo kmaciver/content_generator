@@ -24,6 +24,27 @@ IMMUTABLE_TABLES: tuple[str, ...] = (
     "provider_usage",
 )
 
+#: **Finding M1-04a: an immutable table may never be the source of an
+#: ``ON DELETE SET NULL`` foreign key.**
+#:
+#: ``SET NULL`` is implemented as an UPDATE, and these tables' triggers forbid
+#: UPDATE. The two mechanisms were each correct in isolation and mutually
+#: exclusive in combination: deleting a workspace, a project, or a user raised
+#: ``restrict_violation`` from a cascade the caller never wrote. Erasing a user
+#: — a GDPR operation — was simply impossible.
+#:
+#: Every FK from an immutable table is therefore one of:
+#:
+#: * ``CASCADE`` — the row is meaningless without its parent and dies with it
+#:   (a version's generating job, its lineage parent, a job's transitions).
+#: * **absent** — the row must outlive its parent, so there is no constraint
+#:   to violate (every reference to ``app_user``: history outlives actors,
+#:   which is the same reasoning ``state_transition.subject_id`` already used).
+#:
+#: ``tests/test_schema.py::TestImmutableTableForeignKeys`` enforces this
+#: against the live database, because a model review will not catch it twice.
+FORBIDDEN_FK_ACTION = "SET NULL"
+
 #: One shared trigger function rather than one per table — ``TG_TABLE_NAME``
 #: makes the message specific without duplicating the body five times.
 #:

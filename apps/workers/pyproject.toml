@@ -7,6 +7,16 @@ dependencies = [
     # [redis] extra pulls redis-py + kombu's redis transport.
     "celery[redis]==5.6.3",
     "videoforge-shared",
+    # M1-04: the task skeleton claims jobs and writes artifact versions, so
+    # workers reach the database directly (SADD §13) — which is why the data
+    # layer lives in packages/ rather than under the backend (ADR-013).
+    "videoforge-persistence",
+    # M1-04: the skeleton asks the job FSM whether a failure may retry, and
+    # stage tasks drive the artifact FSM on success (ADR-015).
+    "videoforge-domain",
+    # M1-06/07: stage tasks call providers. Workers are the ONLY tier that
+    # does — provider keys never reach the API or the frontend (NF8).
+    "videoforge-providers",
 ]
 
 # Celery arrives with M0-08; providers/prompts/timeline with M2-M4. Kept empty

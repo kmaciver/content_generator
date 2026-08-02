@@ -50,11 +50,14 @@ class StateTransition(Base):
     from_state: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     to_state: Mapped[str] = mapped_column(sa.Text, nullable=False)
     cause: Mapped[TransitionCause] = mapped_column(TRANSITION_CAUSE, nullable=False)
-    actor_id: Mapped[str | None] = mapped_column(
-        ULIDType, sa.ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
-    )
+    #: **No foreign key** (finding M1-04a), for the same reason ``subject_id``
+    #: has none: history must outlive its actors. ``SET NULL`` would be an
+    #: UPDATE, which this table's trigger forbids — so with an FK here, erasing
+    #: a user was not merely undesirable but impossible.
+    actor_id: Mapped[str | None] = mapped_column(ULIDType, nullable=True)
+    #: CASCADE: a job's transitions belong to that job and go with it.
     job_id: Mapped[str | None] = mapped_column(
-        ULIDType, sa.ForeignKey("generation_job.id", ondelete="SET NULL"), nullable=True
+        ULIDType, sa.ForeignKey("generation_job.id", ondelete="CASCADE"), nullable=True
     )
     correlation_id: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     created_at: Mapped[datetime] = created_at_col()
@@ -84,9 +87,8 @@ class AuditEvent(Base):
     event_type: Mapped[str] = mapped_column(sa.Text, nullable=False)
     subject_type: Mapped[SubjectType] = mapped_column(SUBJECT_TYPE, nullable=False)
     subject_id: Mapped[str] = mapped_column(ULIDType, nullable=False)
-    actor_id: Mapped[str | None] = mapped_column(
-        ULIDType, sa.ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
-    )
+    #: **No foreign key** (finding M1-04a) — see ``StateTransition.actor_id``.
+    actor_id: Mapped[str | None] = mapped_column(ULIDType, nullable=True)
     payload: Mapped[dict[str, Any]] = jsonb_col()
     correlation_id: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     created_at: Mapped[datetime] = created_at_col()

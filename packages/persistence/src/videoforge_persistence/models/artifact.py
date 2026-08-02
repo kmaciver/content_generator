@@ -125,14 +125,20 @@ class ArtifactVersion(Base):
     version_no: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     origin: Mapped[VersionOrigin] = mapped_column(VERSION_ORIGIN, nullable=False)
     #: The job that produced it. NULL for ``human_edit`` and ``import``.
+    #: CASCADE, not SET NULL: SET NULL is an UPDATE, and this table's trigger
+    #: forbids UPDATE — the two made deletion of any project impossible
+    #: (finding M1-04a). The job and the version belong to the same project and
+    #: are only ever deleted together.
     generation_job_id: Mapped[str | None] = mapped_column(
-        ULIDType, sa.ForeignKey("generation_job.id", ondelete="SET NULL"), nullable=True
+        ULIDType, sa.ForeignKey("generation_job.id", ondelete="CASCADE"), nullable=True
     )
     #: Lineage: the version this one replaces (§10.3 rule 2). Self-referential,
     #: forming a chain per artifact — "show me how the script evolved".
+    #: CASCADE for the same reason as ``generation_job_id`` — a whole lineage
+    #: belongs to one artifact and is only ever deleted with it.
     parent_version_id: Mapped[str | None] = mapped_column(
         ULIDType,
-        sa.ForeignKey("artifact_version.id", ondelete="SET NULL"),
+        sa.ForeignKey("artifact_version.id", ondelete="CASCADE"),
         nullable=True,
     )
     #: Where the bytes live in MinIO, for content too large to inline.
@@ -149,9 +155,11 @@ class ArtifactVersion(Base):
     #: which provider/model produced this exact content.
     prompt_template_ref: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     provider_ref: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
-    created_by: Mapped[str | None] = mapped_column(
-        ULIDType, sa.ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
-    )
+    #: **No foreign key** (finding M1-04a). Content must outlive its author:
+    #: erasing a user must not delete the scripts they approved, and it cannot
+    #: NULL this column either, because the trigger above forbids UPDATE.
+    #: Same reasoning as ``state_transition.subject_id``.
+    created_by: Mapped[str | None] = mapped_column(ULIDType, nullable=True)
     created_at: Mapped[datetime] = created_at_col()
     # NOTE: no ``updated_at``. Its absence is a claim, and the trigger enforces it.
 

@@ -7,6 +7,15 @@ dependencies = [
     "Flask==3.1.3",
     "videoforge-shared",
     "videoforge-persistence",
+    # M1-04: services consult the artifact and job FSMs, and the API renders
+    # the same guards into its capabilities payload so buttons never lie
+    # (ADR-015).
+    "videoforge-domain",
+    # M1-04: the API publishes jobs to the broker. Producer only — it sends by
+    # NAME (videoforge_shared.tasks) because importing the worker tasks would
+    # break the apps -> packages rule. It therefore cannot execute a task even
+    # by accident, which is the property worth having.
+    "celery[redis]==5.6.3",
 ]
 
 # uWSGI is deliberately NOT a project dependency. It is a deployment concern

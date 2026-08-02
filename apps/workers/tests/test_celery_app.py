@@ -50,10 +50,24 @@ class TestRegistration:
             assert routes[f"ping.{queue}"] == {"queue": queue}
 
     def test_beat_schedule_references_a_registered_task(self) -> None:
-        for entry in app.conf.beat_schedule.values():
+        """Every beat entry must name a task some module actually registers.
+
+        The import loop reproduces what a worker does at boot: Celery imports
+        ``app.conf.imports`` and *that* is what populates the registry. Doing
+        it from the config rather than from a hand-written list means the
+        check still holds for a task added later — a beat entry pointing at a
+        module missing from ``imports`` fails here instead of erroring on
+        every tick, forever, in a container nobody is watching.
+        """
+        import importlib
+
+        for module in app.conf.imports:
+            importlib.import_module(module)
+
+        for name, entry in app.conf.beat_schedule.items():
             assert entry["task"] in app.tasks, (
-                f"beat schedules {entry['task']!r} which no module registers — "
-                "it would error on every tick, forever"
+                f"beat entry {name!r} schedules {entry['task']!r}, which none "
+                f"of {app.conf.imports} registers"
             )
 
 

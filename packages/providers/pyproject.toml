@@ -3,7 +3,14 @@ name = "videoforge-providers"
 version = "0.1.0"
 description = "Provider protocols and adapters. The only external boundary in the system."
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    # Request/result models. No SDK type crosses this boundary (SADD §15.2).
+    "pydantic==2.13.4",
+    # Provider *selection* and the ProviderKeys type. Note the registry takes
+    # keys as an argument rather than resolving them, so nothing here can read
+    # a secret on its own (NF8).
+    "videoforge-shared",
+]
 
 [build-system]
 requires = ["hatchling"]

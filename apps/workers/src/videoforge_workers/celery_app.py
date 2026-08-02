@@ -14,6 +14,7 @@ from celery.signals import setup_logging
 
 from videoforge_shared.logging import configure_logging
 from videoforge_shared.settings import get_app_settings
+from videoforge_shared.tasks import DRAIN_OUTBOX, RENDER_HELLO, SCRIPT_GENERATE
 
 #: The queue set (SADD §14.1 + D4's `render`). Slow media work must never
 #: starve cheap LLM calls, so these are separate queues consumed by separate
@@ -72,15 +73,29 @@ app.conf.update(
     # -> ping -> skeleton, partially initialised) blew up with ImportError.
     # `imports` breaks the cycle because nothing here imports the tasks at all;
     # producers register tasks simply by importing the module they enqueue.
-    imports=("videoforge_workers.ping", "videoforge_workers.render"),
+    imports=(
+        "videoforge_workers.ping",
+        "videoforge_workers.render",
+        "videoforge_workers.outbox",
+        "videoforge_workers.script",
+    ),
     # ------------------------------------------------------------------ #
-    # Beat (placeholder cadence; M1 swaps in drain_outbox @1s + reconciler)
+    # Beat
     # ------------------------------------------------------------------ #
     beat_schedule={
         "heartbeat": {
             "task": "ping.events",
             "schedule": 30.0,
             "options": {"queue": "events"},
+        },
+        # 1s, per SADD §14.5. The latency a user feels is this interval plus
+        # the poll interval, and the drain is a single indexed query against a
+        # partial index sized to the backlog — cheap enough that a slower tick
+        # would trade real responsiveness for no measurable saving.
+        "drain-outbox": {
+            "task": DRAIN_OUTBOX.name,
+            "schedule": 1.0,
+            "options": {"queue": DRAIN_OUTBOX.queue},
         },
     },
 )
@@ -90,7 +105,9 @@ app.conf.update(
 #: skeleton's helpers; this is the safety net, not the mechanism.
 app.conf.task_routes = {
     **{f"ping.{queue}": {"queue": queue} for queue in QUEUES},
-    "render.hello": {"queue": "render"},
+    RENDER_HELLO.name: {"queue": RENDER_HELLO.queue},
+    DRAIN_OUTBOX.name: {"queue": DRAIN_OUTBOX.queue},
+    SCRIPT_GENERATE.name: {"queue": SCRIPT_GENERATE.queue},
 }
 
 

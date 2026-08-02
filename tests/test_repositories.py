@@ -396,18 +396,30 @@ class TestJobReservation:
 
 class TestOutbox:
     def test_enqueue_claim_and_publish(self, db_session: Session) -> None:
+        """Measured as a *delta*, not an absolute.
+
+        ``backlog()`` is a global health metric — deliberately unscoped, since
+        the drain's question is "is anything undelivered anywhere". Asserting
+        it equals 2 quietly assumed an empty database, which held only while
+        no other test committed. ``test_double_delivery`` then began
+        committing real ``job.requested`` events (outbox rows have no FK to
+        workspace by design, so they survive its teardown) and this failed
+        with 6 — a test-ordering dependency, not a defect in the repository.
+        """
         outbox = OutboxRepository(db_session)
+        before = outbox.backlog()
+
         outbox.enqueue(event_type="artifact.created", payload={"n": 1})
         outbox.enqueue(event_type="artifact.created", payload={"n": 2})
         db_session.flush()
+        assert outbox.backlog() == before + 2
 
-        assert outbox.backlog() == 2
         claimed = outbox.claim_unpublished()
-        assert len(claimed) == 2
+        mine = [e for e in claimed if e.event_type == "artifact.created"]
+        assert len(mine) == 2
 
-        marked = outbox.mark_published([event.id for event in claimed])
-        assert marked == 2
-        assert outbox.backlog() == 0
+        assert outbox.mark_published([e.id for e in mine]) == 2
+        assert outbox.backlog() == before
 
     def test_mark_published_is_idempotent(self, db_session: Session) -> None:
         """A drain that crashes after publishing re-publishes on restart.

@@ -964,14 +964,18 @@ name = "videoforge-backend"
 version = "0.1.0"
 source = { editable = "apps/backend" }
 dependencies = [
+    { name = "celery", extra = ["redis"] },
     { name = "flask" },
+    { name = "videoforge-domain" },
     { name = "videoforge-persistence" },
     { name = "videoforge-shared" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "celery", extras = ["redis"], specifier = "==5.6.3" },
     { name = "flask", specifier = "==3.1.3" },
+    { name = "videoforge-domain", editable = "packages/domain" },
     { name = "videoforge-persistence", editable = "packages/persistence" },
     { name = "videoforge-shared", editable = "packages/shared" },
 ]
@@ -1015,6 +1019,16 @@ source = { editable = "packages/prompts" }
 name = "videoforge-providers"
 version = "0.1.0"
 source = { editable = "packages/providers" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "videoforge-shared" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = "==2.13.4" },
+    { name = "videoforge-shared", editable = "packages/shared" },
+]
 
 [[package]]
 name = "videoforge-shared"
@@ -1048,12 +1062,18 @@ version = "0.1.0"
 source = { editable = "apps/workers" }
 dependencies = [
     { name = "celery", extra = ["redis"] },
+    { name = "videoforge-domain" },
+    { name = "videoforge-persistence" },
+    { name = "videoforge-providers" },
     { name = "videoforge-shared" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "celery", extras = ["redis"], specifier = "==5.6.3" },
+    { name = "videoforge-domain", editable = "packages/domain" },
+    { name = "videoforge-persistence", editable = "packages/persistence" },
+    { name = "videoforge-providers", editable = "packages/providers" },
     { name = "videoforge-shared", editable = "packages/shared" },
 ]
 

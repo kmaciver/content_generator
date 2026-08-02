@@ -11,24 +11,39 @@ in services, and anything resembling transport detail belongs in ``api/``.
 from __future__ import annotations
 
 from flask import Flask
+from sqlalchemy import Engine
 
 from videoforge.api.assets import assets_blueprint
+from videoforge.api.deps import SESSION_FACTORY_KEY, TASK_DISPATCHER_KEY
 from videoforge.api.errors import register_error_handlers
 from videoforge.api.health import health_blueprint
 from videoforge.api.middleware import register_request_middleware
+from videoforge.api.projects import projects_blueprint
 from videoforge.config import AppSettings, get_app_settings
+from videoforge.services.dispatch import CeleryDispatcher, TaskDispatcher
+from videoforge_persistence.engine import create_engine_from_settings, session_factory
 from videoforge_shared.logging import configure_logging
 from videoforge_shared.storage import storage_client_from_settings
 
 API_PREFIX = "/api/v1"
 
 
-def create_app(settings: AppSettings | None = None) -> Flask:
+def create_app(
+    settings: AppSettings | None = None,
+    *,
+    dispatcher: TaskDispatcher | None = None,
+    engine: Engine | None = None,
+) -> Flask:
     """Build the Flask app.
 
     ``settings=None`` (production path) resolves from the environment once and
     caches; tests pass a constructed :class:`AppSettings` and get an app wired
     to it with no environment coupling.
+
+    ``dispatcher`` and ``engine`` are injectable for the same reason: an API
+    test wants a ``RecordingDispatcher`` and a throwaway database, and getting
+    them by constructing the app is cleaner than patching module globals —
+    which would leak between tests and depend on import order.
     """
     resolved = settings if settings is not None else get_app_settings()
 
@@ -44,10 +59,19 @@ def create_app(settings: AppSettings | None = None) -> Flask:
     # entry for a stub without touching any global.
     app.config["VIDEOFORGE_SETTINGS"] = resolved
     app.config["VIDEOFORGE_STORAGE"] = storage_client_from_settings(resolved.minio)
+    # One engine and one dispatcher per process; the *session* is per request
+    # (see api/deps.transaction). Building either per request would be waste.
+    app.config[SESSION_FACTORY_KEY] = session_factory(
+        engine if engine is not None else create_engine_from_settings(resolved.postgres)
+    )
+    app.config[TASK_DISPATCHER_KEY] = (
+        dispatcher if dispatcher is not None else CeleryDispatcher(resolved.celery)
+    )
 
     register_request_middleware(app)
     register_error_handlers(app)
     app.register_blueprint(health_blueprint, url_prefix=API_PREFIX)
     app.register_blueprint(assets_blueprint, url_prefix=API_PREFIX)
+    app.register_blueprint(projects_blueprint, url_prefix=API_PREFIX)
 
     return app

@@ -200,6 +200,94 @@ class TestImmutabilityTriggers:
         assert set(rows) == set(IMMUTABLE_TABLES)
 
 
+class TestImmutableTableForeignKeys:
+    """Finding M1-04a: `SET NULL` and an UPDATE-forbidding trigger cannot coexist.
+
+    ``ON DELETE SET NULL`` is implemented as an UPDATE. Against a table whose
+    trigger raises on UPDATE, the cascade fails — so an FK the author intended
+    as "clean this up quietly" became "this parent can never be deleted", and
+    the error named a table the operator never touched.
+    """
+
+    def test_no_immutable_table_uses_set_null(self, db_session: Session) -> None:
+        """Asserted against pg_constraint, not against the models.
+
+        A model-level check would pass on a database migrated before the fix.
+        This reads what the database actually enforces, which is the only
+        thing that governs at runtime.
+        """
+        offenders = db_session.execute(
+            sa.text(
+                "SELECT c.relname, con.conname FROM pg_constraint con"
+                " JOIN pg_class c ON c.oid = con.conrelid"
+                " WHERE con.contype = 'f'"
+                "   AND con.confupdtype IS NOT NULL"
+                "   AND con.confdeltype = 'n'"  # 'n' = SET NULL
+                "   AND c.relname = ANY(:tables)"
+            ),
+            {"tables": list(IMMUTABLE_TABLES)},
+        ).all()
+        assert offenders == [], (
+            "immutable tables must not use ON DELETE SET NULL — it is an "
+            "UPDATE, which their trigger forbids"
+        )
+
+    def test_deleting_a_workspace_works(self, db_session: Session) -> None:
+        """The operation the bug made impossible.
+
+        Deleting a workspace cascades through project → artifact → version and
+        → job, crossing four of the five immutable tables on the way.
+        """
+        _seed_project(db_session)
+        _add_version(db_session, 1)
+        _decide(db_session, 1, "APPROVE", 1)
+        db_session.execute(
+            sa.text(
+                "INSERT INTO audit_event"
+                " (id, event_type, subject_type, subject_id, actor_id)"
+                " VALUES ('01AE00000000000000000000AA', 'x', 'artifact', :a, :u)"
+            ),
+            {"a": ARTIFACT_ID, "u": USER_ID},
+        )
+
+        db_session.execute(
+            sa.text("DELETE FROM workspace WHERE id = :id"), {"id": WORKSPACE_ID}
+        )
+        remaining = db_session.execute(
+            sa.text("SELECT count(*) FROM artifact_version")
+        ).scalar_one()
+        assert remaining == 0
+
+    def test_erasing_a_user_preserves_the_audit_trail(
+        self, db_session: Session
+    ) -> None:
+        """GDPR erasure must work, and must not rewrite history.
+
+        Both halves are the point. The delete has to succeed (it could not
+        before), and the ``review_decision`` recording that someone approved a
+        version has to survive it — that row is the most load-bearing fact in
+        the audit trail, and an immutable table could not have been NULLed
+        anyway.
+        """
+        _seed_project(db_session)
+        _add_version(db_session, 1)
+        _decide(db_session, 1, "APPROVE", 1)
+
+        db_session.execute(
+            sa.text("DELETE FROM app_user WHERE id = :id"), {"id": USER_ID}
+        )
+
+        surviving = (
+            db_session.execute(sa.text("SELECT reviewer_id FROM review_decision"))
+            .scalars()
+            .all()
+        )
+        assert len(surviving) == 1
+        # The id is retained deliberately: the decision still records *who*,
+        # even though that user row is gone.
+        assert surviving[0] == USER_ID
+
+
 class TestArtifactUniqueness:
     """Finding S1."""
 

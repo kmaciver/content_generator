@@ -52,9 +52,10 @@ class ReviewDecision(Base):
         REVIEW_DECISION_KIND, nullable=False
     )
     comment: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
-    reviewer_id: Mapped[str | None] = mapped_column(
-        ULIDType, sa.ForeignKey("app_user.id", ondelete="SET NULL"), nullable=True
-    )
+    #: **No foreign key** (finding M1-04a). Who approved a version is the most
+    #: load-bearing fact in the audit trail; erasing a user must not erase it,
+    #: and ``SET NULL`` was impossible anyway against this table's trigger.
+    reviewer_id: Mapped[str | None] = mapped_column(ULIDType, nullable=True)
     decided_at: Mapped[datetime] = mapped_column(
         TimestampType, nullable=False, server_default=sa.func.now()
     )
