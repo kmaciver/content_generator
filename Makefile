@@ -45,6 +45,7 @@ TOOL := docker run --rm \
 
 .PHONY: help tooling lock sync lint fmt fmt-check typecheck test check check-all \
         frontend-image lint-js typecheck-js fmt-js fmt-check-js check-js \
+        e2e e2e-image e2e-seed \
         up up-prod down ps logs status seed reset hooks clean \
         migrate migrate-check migrate-new migrate-history verify-secrets env-example \
         exit-test
@@ -125,6 +126,40 @@ fmt-check-js: frontend-image ## Verify frontend formatting (CI mode)
 
 check-js: lint-js typecheck-js fmt-check-js ## Every frontend gate
 
+# --------------------------------------------------------------------------- #
+# End-to-end (M1-11) — the milestone exit criterion
+# --------------------------------------------------------------------------- #
+#
+# Runs against the PROD-LOCAL stack through nginx, on the mock provider. The
+# runner joins the compose network so it reaches nginx by service name; that
+# also means it needs no published ports, which is what the prod profile is
+# about.
+E2E_IMAGE := videoforge-e2e:local
+
+e2e-image: ## Build the Playwright runner image
+	docker build -f docker/e2e/Dockerfile -t $(E2E_IMAGE) docker/e2e
+
+# The seed is a *precondition*, not a convenience. The flow's first action is
+# creating a project, and POST /projects 409s when no workspace row exists —
+# migrations build schema, never data. On a developer machine this is invisible
+# because the dev and prod-local profiles share the same named volumes, so an
+# earlier `make seed` already populated the database; on a clean machine (CI)
+# the suite fails on its first click with an error about workspaces.
+#
+# Seeding here, through the prod files, makes `make e2e` self-sufficient after
+# `make up-prod`. `database.seed` is idempotent, so repeat runs are free.
+e2e-seed:
+	$(COMPOSE_P) run --rm migrate python -m database.seed
+
+e2e: e2e-image e2e-seed ## Run the end-to-end suite (needs `make up-prod` first)
+	docker run --rm \
+	  --network videoforge_default \
+	  -v "$(CURDIR)/apps/frontend":/app \
+	  -v /app/node_modules \
+	  -e BASE_URL=http://nginx \
+	  -w /app $(E2E_IMAGE) \
+	  sh -c "npm install --no-audit --no-fund && npx playwright test"
+
 check: lint fmt-check typecheck test ## Run every Python quality gate, in CI order
 
 check-all: check check-js ## Every gate, Python and frontend
@@ -153,8 +188,8 @@ status: ## Show health of every running service
 logs: ## Tail logs; narrow with `make logs svc=backend`
 	$(COMPOSE_D) logs -f $(svc)
 
-seed: ## Load deterministic demo data
-	@echo "seed: not implemented until M1 (database/seed/)"
+seed: ## Load deterministic demo data (idempotent)
+	$(COMPOSE_D) run --rm migrate python -m database.seed
 
 # --------------------------------------------------------------------------- #
 # Migrations — run inside the compose network via the migrate service's image

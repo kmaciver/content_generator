@@ -9,11 +9,12 @@ Human-in-the-loop by design: every stage produces **immutable, versioned
 artifacts** that you review and approve before the pipeline advances. Nothing
 is ever overwritten.
 
-> **Status: M0 complete; M1 in progress.** The infrastructure foundation is
-> built, tested, and verified end to end. M1 adds the domain spine: the
-> thirteen core tables with their immutability triggers, the artifact and job
-> state machines, and the repositories. The pipeline stages themselves arrive
-> next. The decisions behind it are recorded in [`docs/adr/`](docs/adr/).
+> **Status: M0 and M1 complete; M2 in progress.** The foundation and the domain
+> spine are built, tested, and verified end to end — topic → generate → reject
+> → regenerate → edit → approve, with an audit trail that explains every step,
+> run by CI on every push. M2 is adding the rest of the text pipeline: scenes
+> and prompts, the pipeline DAG, derived project phase, and the staleness
+> cascade. The decisions behind it are recorded in [`docs/adr/`](docs/adr/).
 
 ---
 
@@ -45,7 +46,16 @@ make exit-test
 That runs 22 assertions across the entire stack — services healthy, migrations
 applied, all seven queues round-tripping, a real FFmpeg render landing in
 MinIO, asset serving with byte ranges, the UI, the BFF, and secret isolation.
-It is the same command CI runs.
+
+Then drive the review flow through a real browser:
+
+```bash
+make e2e
+```
+
+Topic → generate → reject → regenerate → edit → approve, through nginx, on the
+mock provider — followed by reading the audit trail back to check it explains
+every step. Both commands are what CI runs, against one boot of the same stack.
 
 Everything runs offline. Provider calls default to `mock`, so no API key is
 needed and nothing can cost money until you deliberately change that.
@@ -59,7 +69,8 @@ make up-prod       # production-local: nginx on :8080, uWSGI, no exposed stores
 make down          # stop, keep data
 make logs svc=backend
 make check-all     # every quality gate: ruff, black, isort, mypy, pytest, eslint, tsc, prettier
-make exit-test     # the full M0 verification
+make exit-test     # the full M0 verification (stack, queues, render, NF8)
+make e2e           # M1's review flow in a real browser (needs `make up-prod`)
 make migrate       # apply database migrations
 make reset         # DESTRUCTIVE: wipe all volumes and start fresh
 ```
@@ -103,7 +114,8 @@ durable job and returns immediately.
 | Document | What it covers |
 |---|---|
 | [Architecture (SADD)](docs/architecture/sadd.md) | The full design, with M0 amendments marked |
-| [ADRs](docs/adr/) | 15 decision records, including two superseded and one withdrawn |
+| [ADRs](docs/adr/) | 16 decision records, including two superseded and one withdrawn |
+| [Code tour](docs/code-tour.md) | A tracked reading plan — twelve stages, in the order that makes them stick |
 | [Runbook](docs/runbook.md) | Operating it: recovery, diagnosis, routine tasks |
 | [Development](docs/development.md) | Working on it, including an optional host environment |
 | [Environment reference](docs/env-reference.md) | Every configuration variable |

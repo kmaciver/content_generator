@@ -111,13 +111,19 @@ jobs:
       - name: Format check (prettier)
         run: make fmt-check-js
 
+  # Both milestone exit criteria, against one boot of the production-local
+  # stack. A separate job per milestone would mean a second cold build and a
+  # second stack boot — the most expensive part of CI — to verify the same
+  # containers. They share a runner instead, in dependency order: if the stack
+  # itself is broken, running a browser against it tells you nothing new.
   exit-test:
-    name: M0 exit test (production-local)
+    name: Exit criteria (production-local)
     needs: [python, frontend]
     runs-on: ubuntu-latest
     # Generous: a cold run compiles uWSGI and installs ffmpeg. Warm runs are
-    # far quicker thanks to the layer cache below.
-    timeout-minutes: 45
+    # far quicker thanks to the layer cache below. The M1 leg adds a ~1GB
+    # Playwright image pull and an npm install on top.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -163,8 +169,24 @@ jobs:
       # queue round-tripping, a real FFmpeg render landing in MinIO, asset
       # serving with Range and immutable caching, the UI, the BFF, and NF8.
       # Byte-identical to what `make exit-test` runs on a laptop.
+      #
+      # KEEP_STACK=1 leaves the stack running. It fixes two things at once:
+      #
+      #   * the M1 leg below needs a stack to drive, and
+      #   * the diagnostics step tears down in an EXIT trap that fires on
+      #     failure too — so without this, the very step meant to explain a
+      #     failure was inspecting containers the script had already removed.
+      #
+      # Teardown moves to an explicit always() step at the end.
       - name: M0 exit test
-        run: make exit-test
+        run: KEEP_STACK=1 make exit-test
+
+      # M1's exit criterion (SADD §27), against the same stack, through nginx,
+      # on the mock provider: topic → generate → reject → regenerate → edit →
+      # approve, then the audit trail read back through the BFF. Byte-identical
+      # to `make e2e` on a laptop.
+      - name: M1 review flow (Playwright)
+        run: make e2e
 
       - name: Diagnostics on failure
         if: failure()
@@ -175,3 +197,10 @@ jobs:
           docker compose --project-directory . \
             -f docker/compose/docker-compose.yml \
             -f docker/compose/compose.prod.yml logs --tail 120 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose --project-directory . \
+            -f docker/compose/docker-compose.yml \
+            -f docker/compose/compose.prod.yml down --remove-orphans || true
