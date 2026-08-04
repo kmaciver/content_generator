@@ -346,8 +346,13 @@ workspace (id, name, settings jsonb)
 app_user (id, workspace_id→, email, display_name, role)                -- future-proofing; seeded single user in v1
         -- [AMENDED M0 — finding B7] named app_user, not `user`: USER is a reserved
         -- SQL keyword and would need quoting in every hand-written query.
-series (id, workspace_id→, title, style_preset jsonb, voice_preset jsonb,
+series (id, workspace_id→, title, voice_preset jsonb,
         music_policy jsonb, hashtag_template, auto_approve_policy jsonb)
+        -- [AMENDED M1 — ADR-016] style_preset jsonb dropped. Visual style becomes a
+        --   series-scoped table with versions and approval; a free-form column beside
+        --   it would be a second source of truth for the look. Dropped now rather than
+        --   with its replacement in M3, because nothing read it — once something does,
+        --   removal costs a data migration out of unvalidated jsonb.
 video_project (id, series_id→?, workspace_id→, topic, title, phase, phase_updated_at,
                active_pointers jsonb, settings jsonb)
         -- phase: coarse enum (§12); active_pointers caches approved-version ids per artifact kind
@@ -367,8 +372,18 @@ artifact_version (id, artifact_id→, version_no int, origin enum{generated,huma
 
 research(id, artifact_id→ …)  script(id, artifact_id→)  script_version(id, artifact_version_id→,
           text_key, word_count, reading_time_s)          -- thin typed extensions where useful
-scene_set(id, artifact_id→, script_version_id→)
+scene_set(id, artifact_version_id→ UNIQUE, script_version_id→)
 scene (id, scene_set_id→, index int, narration_text, visual_brief, target_duration_ms)
+        -- [AMENDED M2-01] scene_set hangs off artifact_VERSION_id, not artifact_id as
+        --   originally drawn. §20 says reordering scenes yields "a new scene_set
+        --   version", and rule 1 below makes content a property of a version — an
+        --   artifact-scoped scene set has nowhere to put the second one. Follows the
+        --   script_version / timeline / render precedent. Both tables are immutable.
+        -- Consequence: scene ids belong to one scene-set version, so approving a
+        --   revised scene set produces new scene rows and therefore new per-scene
+        --   image artifacts, even for unchanged scenes. A stable scene key across
+        --   versions was rejected (matching LLM output across regenerations has no
+        --   reliable answer); see packages/persistence/.../models/scene.py.
 prompt (artifact for scene: prompt_text, negative_prompt, style_tags jsonb)
 generated_asset (artifact_version extension for binaries: mime, width, height, duration_ms,
           bytes, storage_key, content_hash)              -- images, audio, mp4, zip
@@ -414,6 +429,7 @@ Alembic single-head, autogenerate + mandatory human review, `alembic check` in C
 The domain layer expresses the rules the database merely stores:
 
 - **`ProjectPhase` / `pipeline DAG`** — a declarative graph: each stage lists `requires` (artifact kinds that must be APPROVED), `produces` (artifact kind), `queue`, `parallelizable_per_scene: bool`. Loaded from `templates/pipeline.yaml`; the same structure drives phase computation, UI gating, and worker dispatch. Adding a future stage (music generation) is a config + worker addition, not a schema rewrite.
+  - **[AMENDED M1 — ADR-016] The DAG stays homogeneous.** Every name in `requires` is an `ArtifactKind` resolved against `artifact` rows of *this project*. Series-scoped branding (character, style) is **not** a node: it resolves against a different table, it must not cascade staleness, it is satisfied by the project's *pinned* version rather than the series' current one, and an unmet one means *blocked* (409) rather than *in progress*. Four differences, so it is not an edge — it is an admission check, enforced in the dispatch service before the DAG is consulted.
 - **`ArtifactLifecycle`** — the per-artifact FSM (§12.2) with guard methods (`can_approve`, `can_regenerate`) used by services *and* rendered into the UI capabilities payload so buttons never lie.
 - **`ApprovalPolicy`** — per-Series auto-approve flags per stage (challenge to the brief: six mandatory human gates per video is heavy at volume; policy makes gates configurable while defaulting to all-manual).
 - **`TimelineCompiler` input/output models** — pure functions from approved artifacts → `Timeline` (§16.2), fully unit-testable.
@@ -868,6 +884,7 @@ ADRs live in `docs/adr` (MADR format); the following are drafted with this docum
 | 013 | Settings and data layer in `packages/`, not the backend | Accepted |
 | 014 | Containerised toolchain; the host needs only Docker | Accepted |
 | 015 | Workflow rules in `packages/domain`, not the backend | Accepted |
+| 016 | Series-scoped branding assets; projects pin the version used | Accepted (design; M3) |
 
 ## 27. Implementation Roadmap
 

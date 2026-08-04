@@ -28,3 +28,10 @@ UI gating, and worker dispatch.
   artifacts stale automatically.
 - Cost: dispatch is data-driven and therefore a step less obvious to read
   than a hardcoded chain. Mitigated by keeping the YAML small and tested.
+- **[2026-08-02, ADR-016] The graph is homogeneous, and stays that way.**
+  Every `requires` entry is an `ArtifactKind` resolved against `artifact` rows
+  of *this project*. Series-scoped branding (character, style) was considered
+  as a second kind of dependency and kept out: it differs in resolution,
+  staleness, what satisfies it, and what "unmet" means, so it is an admission
+  check in the dispatch service rather than an edge. Before adding any
+  dependency that is not a project-scoped artifact kind, read ADR-016.
