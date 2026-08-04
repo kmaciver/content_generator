@@ -31,9 +31,16 @@ from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -73,6 +80,27 @@ class ProviderMode(StrEnum):
     REPLAY = "replay"
 
 
+#: ISO 4217, three uppercase letters. Validated rather than free text so
+#: "usd", "dollars" and "US$" fail at settings load instead of appearing in a
+#: cost report that nobody can compare across deployments.
+def _normalise_currency(value: Any) -> Any:
+    """Case and whitespace before validation, not as part of it.
+
+    ``StringConstraints`` applies its pattern to the *input*, so pairing
+    ``to_upper=True`` with ``^[A-Z]{3}$`` rejects ``cad`` before it can be
+    upper-cased — the normalisation looks present and never runs. Splitting the
+    two makes the order explicit rather than a property of pydantic internals.
+    """
+    return value.strip().upper() if isinstance(value, str) else value
+
+
+CurrencyCode = Annotated[
+    str,
+    BeforeValidator(_normalise_currency),
+    StringConstraints(pattern=r"^[A-Z]{3}$"),
+]
+
+
 class CoreSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
@@ -81,7 +109,24 @@ class CoreSettings(BaseSettings):
     log_format: LogFormat = LogFormat.JSON
     api_token: SecretStr = SecretStr("dev-token-change-me")
     internal_hmac_secret: SecretStr = SecretStr("dev-hmac-change-me")
-    daily_cost_limit_usd: Decimal = Decimal("10.00")
+    #: Estimated provider spend allowed per workspace-day (SADD §21.4, S10).
+    #:
+    #: The unit lives in :attr:`cost_currency`, not in this field's name. It
+    #: was ``daily_cost_limit_usd`` until M2-06, and baking the unit into the
+    #: identifier turned out to invite exactly the wrong question — an operator
+    #: whose Anthropic credits were bought in CAD reasonably asked whether the
+    #: number meant their card statement. It does not, and no name ending in
+    #: ``_usd`` can say so.
+    daily_cost_limit: Decimal = Decimal("10.00")
+    #: What the limit above, and every ``Usage.unit_cost_estimate``, are
+    #: denominated in.
+    #:
+    #: **This is a label, not a conversion.** Estimates come from price tables
+    #: inside each adapter, and vendors publish those in USD — so changing this
+    #: without changing the tables relabels the numbers and makes them wrong.
+    #: It exists so the numbers can *say* what they are, which is what the
+    #: `Money` value object of §11 was always for.
+    cost_currency: CurrencyCode = "USD"
 
 
 class PostgresSettings(BaseSettings):

@@ -10,6 +10,12 @@ dependencies = [
     # synchronous); the same driver serves async later if anything needs it.
     "psycopg[binary]==3.3.4",
     "videoforge-shared",
+    # The pipeline graph and phase rules. persistence -> domain -> shared is
+    # acyclic, and the direction matters: ADR-015 rejects domain depending on
+    # persistence (it would drag SQLAlchemy into the pure layer), not this.
+    # `phase` and `stale_since` are caches over artifact truth, so maintaining
+    # them belongs beside the rows, while the rules stay pure.
+    "videoforge-domain",
 ]
 
 [build-system]

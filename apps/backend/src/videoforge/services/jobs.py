@@ -20,15 +20,15 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from videoforge.services.dispatch import TaskDispatcher
 from videoforge_domain.artifact_lifecycle import ArtifactEvent, apply_event
 from videoforge_domain.job_lifecycle import (
     IllegalJobTransitionError,
     JobEvent,
     apply_job_event,
 )
-
-from videoforge.services.dispatch import TaskDispatcher
 from videoforge_persistence.models import Artifact, GenerationJob
+from videoforge_persistence.projection import refresh_project_state
 from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.enums import (
     ArtifactKind,
@@ -189,6 +189,11 @@ class JobService:
                 "kind": kind.value,
             },
         )
+
+        # The artifact just moved into GENERATING; the project's phase
+        # follows. Inside the caller's transaction, like everything else
+        # here — only the broker message waits for the commit.
+        refresh_project_state(uow, project_id)
 
         self._pending.append((spec, {"job_id": reserved.job.id}))
         return JobRequest(job=reserved.job, artifact=artifact, created=True)

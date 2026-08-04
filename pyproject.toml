@@ -73,9 +73,14 @@ known_first_party = [
     "videoforge_workers",
     "videoforge_shared",
     "videoforge_persistence",
+    "videoforge_domain",
     "videoforge_providers",
     "videoforge_prompts",
     "videoforge_timeline",
+    # The seed package (M1-10). Not a distribution — it is imported as a
+    # namespace package from the repo root — but it is unambiguously ours, and
+    # leaving it out makes isort and ruff classify it differently and fight.
+    "database",
 ]
 
 [tool.ruff]
@@ -86,6 +91,7 @@ src = [
     "apps/workers/src",
     "packages/shared/src",
     "packages/persistence/src",
+    "packages/domain/src",
     "packages/providers/src",
     "packages/prompts/src",
     "packages/timeline/src",
@@ -102,9 +108,14 @@ known-first-party = [
     "videoforge_workers",
     "videoforge_shared",
     "videoforge_persistence",
+    "videoforge_domain",
     "videoforge_providers",
     "videoforge_prompts",
     "videoforge_timeline",
+    # The seed package (M1-10). Not a distribution — it is imported as a
+    # namespace package from the repo root — but it is unambiguously ours, and
+    # leaving it out makes isort and ruff classify it differently and fight.
+    "database",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -155,6 +166,13 @@ follow_imports = "skip"
 # cross-cutting integration and e2e (SADD 8).
 testpaths = ["apps", "packages", "tests"]
 python_files = ["test_*.py"]
+# `database/` is a scripts directory, not a workspace member, so nothing puts it
+# on sys.path — the seed is reached in production as `python -m database.seed`,
+# which works only because `-m` prepends the cwd. `uv run pytest` does not, so
+# tests/test_seed.py cannot import it without this. Prepending the repo root
+# here reproduces the runtime resolution exactly rather than inventing a second
+# one; making `database` an installable package would invent one.
+pythonpath = ["."]
 addopts = "-ra --strict-markers"
 markers = [
     "integration: needs a real Postgres via testcontainers (and a docker socket)",

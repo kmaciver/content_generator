@@ -20,7 +20,6 @@ import logging
 
 from flask import Blueprint, Response, jsonify, request
 from pydantic import BaseModel, ValidationError
-from videoforge_domain.artifact_lifecycle import IllegalTransitionError
 
 from videoforge.api.deps import dispatcher, transaction
 from videoforge.api.errors import ApiError
@@ -40,19 +39,12 @@ from videoforge.dto import (
 )
 from videoforge.services.jobs import JobService
 from videoforge.services.review import ReviewService, StaleVersionError
-from videoforge_shared.enums import ArtifactKind
-from videoforge_shared.tasks import SCRIPT_GENERATE, TaskSpec
+from videoforge_domain.artifact_lifecycle import IllegalTransitionError
+from videoforge_shared.tasks import STAGE_TASKS
 
 logger = logging.getLogger(__name__)
 
 projects_blueprint = Blueprint("projects", __name__)
-
-#: Which task produces which artifact kind. A dict rather than a naming
-#: convention so an unimplemented stage is a 400 with a list, not a message
-#: published to a queue nothing consumes. M2+ fill in the rest.
-STAGE_TASKS: dict[ArtifactKind, TaskSpec] = {
-    ArtifactKind.SCRIPT: SCRIPT_GENERATE,
-}
 
 
 def _body[T: BaseModel](model: type[T]) -> T:

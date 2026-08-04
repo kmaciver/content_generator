@@ -62,10 +62,30 @@ export interface ProjectSummary {
   created_at: string;
 }
 
+/** One pipeline stage, as the server computes it (M2-13).
+ *
+ * The DAG lives on the server (ADR-009) and stays there. Reimplementing the
+ * dependency graph here to decide whether "Generate scenes" is enabled is the
+ * same drift `capabilities` exists to prevent, one level up — so the server
+ * sends the answer *and* the reason.
+ */
+export interface StageSummary {
+  kind: string;
+  queue: string;
+  state: string | null;
+  artifact_id: string | null;
+  stale_since: string | null;
+  requires: string[];
+  /** Not-yet-approved requirements. Empty means runnable. */
+  unmet: string[];
+  can_generate: boolean;
+}
+
 export interface ProjectDetail extends ProjectSummary {
   series_id: string | null;
   active_pointers: Record<string, string>;
   artifacts: ArtifactSummary[];
+  stages: StageSummary[];
 }
 
 export interface JobResponse {

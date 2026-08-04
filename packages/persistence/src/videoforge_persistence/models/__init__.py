@@ -1,4 +1,4 @@
-"""The thirteen core tables (SADD §10.2).
+"""The core tables (SADD §10.2) — thirteen from M1, plus M2's scene pair.
 
 Importing this package is what populates ``Base.metadata``. Alembic's env.py
 imports it for exactly that reason — a model module that nothing imports is a
@@ -9,6 +9,8 @@ Grouped by lifetime rather than alphabetically:
 - ``org``      — workspace, app_user, series: configuration, changes rarely.
 - ``project``  — video_project: one row per video.
 - ``artifact`` — artifact, artifact_version: identity vs content (§10.3).
+- ``scene``    — scene_set, scene: the first *structured* artifact content,
+  hung off a version rather than an artifact (see the module docstring).
 - ``job``      — generation_job, provider_usage: execution and its cost.
 - ``review``   — review_decision, comment: human verdicts and human notes.
 - ``audit``    — state_transition, audit_event, outbox_event: the write-also
@@ -21,6 +23,7 @@ from videoforge_persistence.models.job import GenerationJob, ProviderUsage
 from videoforge_persistence.models.org import AppUser, Series, Workspace
 from videoforge_persistence.models.project import VideoProject
 from videoforge_persistence.models.review import Comment, ReviewDecision
+from videoforge_persistence.models.scene import Scene, SceneSet
 
 __all__ = [
     "AppUser",
@@ -32,6 +35,8 @@ __all__ = [
     "OutboxEvent",
     "ProviderUsage",
     "ReviewDecision",
+    "Scene",
+    "SceneSet",
     "Series",
     "StateTransition",
     "VideoProject",

@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from videoforge.services.dispatch import RecordingDispatcher
 from videoforge.services.jobs import JobService, idempotency_key
 from videoforge_persistence.models import Workspace
+from videoforge_persistence.repositories.jobs import JobRepository
 from videoforge_persistence.uow import unit_of_work
 from videoforge_shared.enums import (
     ArtifactKind,
@@ -243,6 +244,16 @@ class TestDoubleDelivery:
         Both halves matter: a half-written artifact version would be worse
         than none, and a failure with no row leaves a job stuck in RUNNING
         forever with nothing to explain it.
+
+        **Amended 2026-08-03.** This asserted the job landed back in QUEUED,
+        because `may_retry` said another attempt was allowed. Nothing ever made
+        that attempt — the reconciler (§14.4) is deferred and Celery autoretry
+        is not wired — so the job sat in a live status forever, holding its
+        idempotency key, which made the artifact's Regenerate button a silent
+        no-op. A single 529 from a real provider left a project unrecoverable.
+
+        The job now ends FAILED, which is both true and actionable. See
+        `skeleton._REQUEUE_IS_HONOURED`.
         """
         with unit_of_work(sessions) as uow:
             outcome = JobService(uow, RecordingDispatcher()).request(
@@ -271,7 +282,7 @@ class TestDoubleDelivery:
             job = uow.jobs.get(job_id)
             assert job is not None
             # max_attempts defaults to 3 and this was attempt 1, so it requeues.
-            assert job.status is JobStatus.QUEUED
+            assert job.status is JobStatus.FAILED
             assert job.error is not None
             assert job.error["type"] == "RuntimeError"
             assert "provider exploded" in job.error["message"]
@@ -286,3 +297,124 @@ class TestDoubleDelivery:
         its work was in flight.
         """
         assert _run(monkeypatch, sessions, new_ulid(), lambda ctx: None) is False
+
+
+def _spine(session: Session) -> tuple[str, str]:
+    """Workspace → project → artifact, the minimum a job can reference."""
+    workspace_id, project_id, artifact_id = new_ulid(), new_ulid(), new_ulid()
+    session.execute(
+        sa.text("INSERT INTO workspace (id, name) VALUES (:id, 'keys')"),
+        {"id": workspace_id},
+    )
+    session.execute(
+        sa.text(
+            "INSERT INTO video_project (id, workspace_id, topic, phase)"
+            " VALUES (:id, :ws, 'keys', 'DRAFT')"
+        ),
+        {"id": project_id, "ws": workspace_id},
+    )
+    session.execute(
+        sa.text(
+            "INSERT INTO artifact (id, project_id, kind, state)"
+            " VALUES (:id, :p, 'script', 'GENERATING')"
+        ),
+        {"id": artifact_id, "p": project_id},
+    )
+    session.flush()
+    return project_id, artifact_id
+
+
+class TestDeadJobsReleaseTheirKey:
+    """The 529 chain, as a test.
+
+    A job that ended badly held its idempotency key forever. Because the key is
+    derived from the version it would have produced — and a failure produces no
+    version — the same request could never be made again: `reserve` kept
+    returning the dead job, and the artifact's Regenerate button was a silent
+    no-op. One overloaded-provider response made a project unrecoverable.
+    """
+
+    def test_a_failed_job_frees_the_key(self, db_session: Session) -> None:
+        repo = JobRepository(db_session)
+        project_id, artifact_id = _spine(db_session)
+        key = "script.generate:one:v1"
+
+        first = repo.reserve(
+            project_id=project_id,
+            task_name="script.generate",
+            queue="llm",
+            idempotency_key=key,
+            artifact_id=artifact_id,
+        )
+        assert first.created is True
+
+        db_session.execute(
+            sa.text("UPDATE generation_job SET status = 'FAILED' WHERE id = :id"),
+            {"id": first.job.id},
+        )
+
+        second = repo.reserve(
+            project_id=project_id,
+            task_name="script.generate",
+            queue="llm",
+            idempotency_key=key,
+            artifact_id=artifact_id,
+        )
+        assert second.created is True, "a dead job must not block a retry"
+        assert second.job.id != first.job.id
+
+    def test_a_succeeded_job_still_holds_it(self, db_session: Session) -> None:
+        """The half that must NOT change.
+
+        This is the double-delivery guarantee (§14.3): a redelivered task whose
+        twin already produced a version has to find the key taken, or the same
+        job runs twice and the artifact gains a duplicate version.
+        """
+        repo = JobRepository(db_session)
+        project_id, artifact_id = _spine(db_session)
+        key = "script.generate:two:v1"
+
+        first = repo.reserve(
+            project_id=project_id,
+            task_name="script.generate",
+            queue="llm",
+            idempotency_key=key,
+            artifact_id=artifact_id,
+        )
+        db_session.execute(
+            sa.text("UPDATE generation_job SET status = 'SUCCEEDED' WHERE id = :id"),
+            {"id": first.job.id},
+        )
+
+        second = repo.reserve(
+            project_id=project_id,
+            task_name="script.generate",
+            queue="llm",
+            idempotency_key=key,
+            artifact_id=artifact_id,
+        )
+        assert second.created is False
+        assert second.job.id == first.job.id
+
+    def test_a_queued_job_still_holds_it(self, db_session: Session) -> None:
+        """In flight, not dead. A double-click must still collapse to one job."""
+        repo = JobRepository(db_session)
+        project_id, artifact_id = _spine(db_session)
+        key = "script.generate:three:v1"
+
+        first = repo.reserve(
+            project_id=project_id,
+            task_name="script.generate",
+            queue="llm",
+            idempotency_key=key,
+            artifact_id=artifact_id,
+        )
+        second = repo.reserve(
+            project_id=project_id,
+            task_name="script.generate",
+            queue="llm",
+            idempotency_key=key,
+            artifact_id=artifact_id,
+        )
+        assert second.created is False
+        assert second.job.id == first.job.id

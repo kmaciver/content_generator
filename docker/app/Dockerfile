@@ -131,6 +131,12 @@ COPY --from=builder --chown=app:uwsgisock /app/packages /app/packages
 # Migrations ride in the same image: the migrate service is this image with
 # `alembic upgrade head` as its command (SADD §7.3).
 COPY --chown=app:uwsgisock database/ /app/database/
+# The pipeline declaration (ADR-009). Unlike `config/providers.yaml`, which the
+# settings layer treats as optional and falls back from, a missing pipeline is
+# fatal by design: a silent default would let a container start and behave as
+# though stages the operator removed still existed. That makes shipping this
+# directory a hard requirement rather than a convenience.
+COPY --chown=app:uwsgisock templates/ /app/templates/
 
 # Never root. uWSGI does not need it here (see the setgid directory above), and
 # neither do the workers.

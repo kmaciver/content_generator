@@ -20,8 +20,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
-from videoforge_domain.job_lifecycle import may_retry
 
+from videoforge_domain.job_lifecycle import may_retry
 from videoforge_persistence.models import Workspace
 from videoforge_persistence.repositories import (
     ArtifactRepository,

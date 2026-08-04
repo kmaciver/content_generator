@@ -19,12 +19,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from videoforge_shared.enums import ArtifactKind
+
 __all__ = [
     "DRAIN_OUTBOX",
     "PING",
+    "PROMPTS_GENERATE",
     "RECONCILE_JOBS",
+    "RESEARCH_GENERATE",
+    "SCENES_GENERATE",
     "RENDER_HELLO",
     "SCRIPT_GENERATE",
+    "STAGE_TASKS",
     "TaskSpec",
 ]
 
@@ -42,8 +48,27 @@ class TaskSpec:
     queue: str
 
 
-#: Stage tasks.
+#: Stage tasks. Queues mirror `templates/pipeline.yaml`, and a test asserts
+#: they agree — a stage routed to a queue no worker consumes is a job that
+#: sits in the broker forever with no error anywhere.
+RESEARCH_GENERATE = TaskSpec("research.generate", "llm")
 SCRIPT_GENERATE = TaskSpec("script.generate", "llm")
+SCENES_GENERATE = TaskSpec("scenes.generate", "llm")
+PROMPTS_GENERATE = TaskSpec("prompts.generate", "llm")
+
+#: Which task produces which artifact kind.
+#:
+#: Here rather than in the API because two callers need it and neither may own
+#: it: the endpoint that dispatches a stage, and the DTO that tells the UI
+#: whether a stage is implemented yet. A dict rather than a naming convention
+#: so an unimplemented stage is a 400 with a list, not a message published to a
+#: queue nothing consumes. M3+ fill in the rest.
+STAGE_TASKS: dict[ArtifactKind, TaskSpec] = {
+    ArtifactKind.RESEARCH: RESEARCH_GENERATE,
+    ArtifactKind.SCRIPT: SCRIPT_GENERATE,
+    ArtifactKind.SCENE_SET: SCENES_GENERATE,
+    ArtifactKind.PROMPT: PROMPTS_GENERATE,
+}
 
 #: Infrastructure tasks.
 DRAIN_OUTBOX = TaskSpec("outbox.drain", "events")

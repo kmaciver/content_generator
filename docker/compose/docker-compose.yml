@@ -52,7 +52,11 @@ x-app-env: &app-env
   MINIO_BUCKET_TMP_RENDER: "${MINIO_BUCKET_TMP_RENDER:-tmp-render}"
   API_TOKEN: "${API_TOKEN:-dev-token-change-me}"
   INTERNAL_HMAC_SECRET: "${INTERNAL_HMAC_SECRET:-dev-hmac-change-me}"
-  DAILY_COST_LIMIT_USD: "${DAILY_COST_LIMIT_USD:-10.00}"
+  DAILY_COST_LIMIT: "${DAILY_COST_LIMIT:-10.00}"
+  # A label for the numbers, not a conversion — adapter price tables are
+  # published in USD, so changing this without changing them relabels
+  # estimates and makes them wrong.
+  COST_CURRENCY: "${COST_CURRENCY:-USD}"
 
 # Provider credentials and selection. Referenced ONLY by the provider-calling
 # workers. Splitting this out is what makes the blast-radius rule mechanically
@@ -65,6 +69,16 @@ x-provider-secrets: &provider-secrets
   PROVIDERS__LLM__ADAPTER: "${PROVIDERS__LLM__ADAPTER:-mock}"
   PROVIDERS__IMAGE__ADAPTER: "${PROVIDERS__IMAGE__ADAPTER:-mock}"
   PROVIDERS__VOICE__ADAPTER: "${PROVIDERS__VOICE__ADAPTER:-mock}"
+  # Model / voice selection. `docs/env-reference.md` documents all of these as
+  # settable, and until now only the ADAPTER lines were forwarded — so setting
+  # PROVIDERS__LLM__MODEL in .env did nothing and the container silently used
+  # the providers.yaml value instead. Empty means "leave whatever the config
+  # file or the adapter default says", which is why the fallbacks are blank
+  # rather than a hardcoded model name.
+  PROVIDERS__LLM__MODEL: "${PROVIDERS__LLM__MODEL:-}"
+  PROVIDERS__LLM__TIMEOUT_S: "${PROVIDERS__LLM__TIMEOUT_S:-120}"
+  PROVIDERS__IMAGE__MODEL: "${PROVIDERS__IMAGE__MODEL:-}"
+  PROVIDERS__VOICE__VOICE_ID: "${PROVIDERS__VOICE__VOICE_ID:-}"
   OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
   ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY:-}"

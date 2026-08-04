@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Provider protocols and adapters. The only external boundary in the system."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    # Anthropic SDK (M2-06). Imported only inside `anthropic_adapter`, which is
+    # reached only when that adapter is selected — so a mock/replay deployment
+    # never touches it.
+    "anthropic==0.75.0",
     # Request/result models. No SDK type crosses this boundary (SADD §15.2).
     "pydantic==2.13.4",
     # Provider *selection* and the ProviderKeys type. Note the registry takes

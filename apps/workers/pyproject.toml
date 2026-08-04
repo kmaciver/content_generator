@@ -14,6 +14,9 @@ dependencies = [
     # M1-04: the skeleton asks the job FSM whether a failure may retry, and
     # stage tasks drive the artifact FSM on success (ADR-015).
     "videoforge-domain",
+    # M2-05: stages render their prompts from versioned templates, and pin
+    # the resulting ref onto every version they write (§10.3 rule 4).
+    "videoforge-prompts",
     # M1-06/07: stage tasks call providers. Workers are the ONLY tier that
     # does — provider keys never reach the API or the frontend (NF8).
     "videoforge-providers",

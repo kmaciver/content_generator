@@ -1,0 +1,86 @@
+# The pipeline, as data (ADR-009).
+#
+# One declaration drives four things: which stages may run, how the project's
+# phase is computed (§12.4), how staleness cascades (S2), and which queue a job
+# is published to. Adding a stage is an edit here plus a worker — never a schema
+# change and never a dispatch-logic change.
+#
+# RULES, enforced by the loader in `videoforge_domain.pipeline`:
+#
+#   * `produces` and every entry in `requires` must be an `ArtifactKind`. This
+#     is ADR-016's homogeneity rule: a dependency on an approved *series* asset
+#     (character, style) is deliberately NOT expressible here. Those differ in
+#     resolution, staleness, what satisfies them, and what "unmet" means, so
+#     they are an admission check in the dispatch service — not an edge.
+#   * every `requires` entry must be produced by some stage. A dangling
+#     requirement is a stage that can never run, and it should fail at boot
+#     rather than by never appearing in the UI.
+#   * the graph must be acyclic.
+#
+# `requires` means "these artifact kinds must be APPROVED in this project".
+# An empty list makes a stage a root — it needs only the project's topic.
+
+stages:
+  - produces: research
+    requires: []
+    queue: llm
+    phase_generating: RESEARCHING
+    phase_review: RESEARCH_REVIEW
+
+  - produces: script
+    requires: [research]
+    queue: llm
+    phase_generating: SCRIPTING
+    phase_review: SCRIPT_REVIEW
+
+  - produces: scene_set
+    requires: [script]
+    queue: llm
+    phase_generating: SCENING
+    phase_review: SCENES_REVIEW
+
+  - produces: prompt
+    requires: [scene_set]
+    queue: llm
+    # One job, N prompt artifacts — the fan-out is inside the task (§13).
+    parallelizable_per_scene: true
+    phase_generating: SCENING
+    phase_review: SCENES_REVIEW
+
+  # image and voice both descend from scene_set and neither depends on the
+  # other, which is the concurrency ADR-009 exists to express: they run in
+  # parallel and roughly halve wall-clock time per video.
+  - produces: image
+    requires: [prompt]
+    queue: image
+    parallelizable_per_scene: true
+    phase_generating: MEDIA_GENERATION
+    phase_review: MEDIA_REVIEW
+
+  # NOT per-scene, deliberately (finding B3 revised, §13): one synthesis call
+  # for the whole script, with word timestamps, and scene boundaries recovered
+  # by walking the word list. Twenty isolated reads concatenate into a list,
+  # not a narration.
+  - produces: voice
+    requires: [scene_set]
+    queue: voice
+    phase_generating: MEDIA_GENERATION
+    phase_review: MEDIA_REVIEW
+
+  - produces: timeline
+    requires: [image, voice]
+    queue: timeline
+    phase_generating: TIMELINE_READY
+    phase_review: TIMELINE_READY
+
+  - produces: render
+    requires: [timeline]
+    queue: render
+    phase_generating: RENDERING
+    phase_review: RENDER_REVIEW
+
+  - produces: package
+    requires: [render]
+    queue: package
+    phase_generating: PACKAGING
+    phase_review: READY_TO_PUBLISH

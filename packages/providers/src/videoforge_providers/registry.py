@@ -16,9 +16,14 @@ from __future__ import annotations
 
 import logging
 
+from videoforge_providers.anthropic_adapter import AnthropicLLMProvider
 from videoforge_providers.middleware import with_standard_middleware
 from videoforge_providers.mock import MockLLMProvider
 from videoforge_providers.protocols import LLMProvider
+from videoforge_providers.record_replay import (
+    RecordingLLMProvider,
+    ReplayLLMProvider,
+)
 from videoforge_shared.settings import ProviderKeys, ProviderMode, ProviderSettings
 
 logger = logging.getLogger(__name__)
@@ -35,10 +40,9 @@ class UnknownAdapterError(ValueError):
     """
 
 
-#: Adapters that exist today. Real ones land in M2 (LLM) and M3 (image, voice);
-#: the mapping is here so an unknown name fails with a list rather than a
-#: KeyError.
-_LLM_ADAPTERS = frozenset({"mock"})
+#: Adapters that exist today. Image and voice land in M3; the mapping is here
+#: so an unknown name fails with a list rather than a KeyError.
+_LLM_ADAPTERS = frozenset({"mock", "anthropic"})
 
 
 def build_llm_provider(
@@ -65,18 +69,48 @@ def build_llm_provider(
             )
         adapter = "mock"
 
+    # REPLAY short-circuits before the adapter is even resolved. It needs no
+    # key, no SDK and no network — which is what lets CI exercise the real
+    # adapter's *output* on a machine that could not reach the vendor if it
+    # tried. Checked ahead of the adapter name so `replay` also works after a
+    # vendor is renamed or removed.
+    if providers.mode is ProviderMode.REPLAY:
+        return _wrap(ReplayLLMProvider(), with_middleware)
+
     if adapter not in _LLM_ADAPTERS:
         raise UnknownAdapterError(
             f"unknown LLM adapter {adapter!r}; available: "
             f"{', '.join(sorted(_LLM_ADAPTERS))}"
         )
 
-    provider: LLMProvider = MockLLMProvider(model=providers.llm.model or "mock-llm-v1")
+    provider: LLMProvider
+    if adapter == "anthropic":
+        # `keys` is required here, and this is the line NF8 protects: only
+        # `WorkerSettings` can produce a `ProviderKeys`, so the API process
+        # cannot reach this branch even by misconfiguration.
+        if keys is None or keys.anthropic_api_key is None:
+            raise UnknownAdapterError(
+                "adapter 'anthropic' needs ANTHROPIC_API_KEY, which reaches "
+                "worker containers only (NF8). Set it in .env, or use "
+                "PROVIDERS__MODE=mock / replay."
+            )
+        provider = AnthropicLLMProvider(
+            api_key=keys.anthropic_api_key.get_secret_value(),
+            model=providers.llm.model,
+            timeout_s=providers.llm.timeout_s,
+        )
+    else:
+        provider = MockLLMProvider(model=providers.llm.model or "mock-llm-v1")
 
-    # `keys` is unused while `mock` is the only adapter. It stays in the
-    # signature because the alternative — adding it when the first real
-    # adapter lands — is the moment someone reaches for a module-level
-    # `ProviderKeys()` instead and quietly reads secrets in the API process.
-    _ = keys
+    # RECORD wraps the real adapter rather than replacing it: the call still
+    # happens and still costs money — recording is a side effect, not a mode of
+    # its own. Wrapped *inside* the middleware so what gets written down is the
+    # provider's own answer, not one shaped by retries or metering.
+    if providers.mode is ProviderMode.RECORD:
+        provider = RecordingLLMProvider(provider)
 
+    return _wrap(provider, with_middleware)
+
+
+def _wrap(provider: LLMProvider, with_middleware: bool) -> LLMProvider:
     return with_standard_middleware(provider) if with_middleware else provider

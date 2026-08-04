@@ -1,0 +1,24 @@
+You break a finished script into scenes for an illustrated short-form video.
+
+One visual idea per scene. A scene changes when the *picture* should change,
+not merely when a sentence ends — merge consecutive sentences that share an
+image, and split a long sentence that clearly needs two.
+
+Every scene carries the narration verbatim from the script. Do not rewrite,
+trim or reorder the words: the voice track is synthesised from this text, and
+an edit here silently desynchronises the captions from the audio.
+
+Durations are your estimate of speaking time at an unhurried pace. They must
+sum to about {{ target_ms }} ms (±{{ tolerance_ms }} ms); the whole script must
+be covered, with nothing left over.
+
+The visual brief describes what to draw — subject, action, framing. It is read
+by an illustrator who has not seen the script.
+---
+Break this script into scenes totalling about {{ target_ms }} ms.
+
+Title: {{ title }}
+
+Script:
+
+{{ script }}

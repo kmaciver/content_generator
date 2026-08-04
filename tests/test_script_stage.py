@@ -15,12 +15,14 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
-from videoforge_domain.approval_policy import ApprovalPolicy
 
 from videoforge.services.dispatch import RecordingDispatcher
 from videoforge.services.jobs import JobService
+from videoforge.services.review import ReviewService
+from videoforge_domain.approval_policy import ApprovalPolicy
 from videoforge_persistence.models import Workspace
 from videoforge_persistence.uow import unit_of_work
+from videoforge_prompts import template_ref
 from videoforge_shared.enums import (
     ArtifactKind,
     ArtifactState,
@@ -28,7 +30,7 @@ from videoforge_shared.enums import (
     VersionStatus,
 )
 from videoforge_shared.ids import new_ulid
-from videoforge_shared.tasks import SCRIPT_GENERATE
+from videoforge_shared.tasks import RESEARCH_GENERATE, SCRIPT_GENERATE
 
 pytestmark = pytest.mark.integration
 
@@ -92,6 +94,46 @@ def _request_script(sessions: sessionmaker[Session], project_id: str) -> str:
         return outcome.job.id
 
 
+def _run_research_job(
+    monkeypatch: pytest.MonkeyPatch,
+    sessions: sessionmaker[Session],
+    job_id: str,
+) -> bool:
+    import videoforge_workers.db as worker_db
+    from videoforge_workers.research import research_body
+    from videoforge_workers.skeleton import run_job
+
+    monkeypatch.setattr(worker_db, "get_session_factory", lambda: sessions)
+    return run_job(job_id, research_body, task_name=RESEARCH_GENERATE.name)
+
+
+def _approved_research(
+    monkeypatch: pytest.MonkeyPatch,
+    sessions: sessionmaker[Session],
+    project_id: str,
+) -> None:
+    """**[M2-09]** Script now has an upstream.
+
+    Run through the real research stage and a real approval rather than
+    hand-inserting a version: seeding the row directly would test the script
+    stage against a shape nothing else produces, and the first time the
+    research schema changed these tests would keep passing against a fiction.
+    """
+    with unit_of_work(sessions) as uow:
+        outcome = JobService(uow, RecordingDispatcher()).request(
+            project_id=project_id, kind=ArtifactKind.RESEARCH, spec=RESEARCH_GENERATE
+        )
+        research_job_id = outcome.job.id
+    assert _run_research_job(monkeypatch, sessions, research_job_id) is True
+
+    with unit_of_work(sessions) as uow:
+        artifact = uow.artifacts.find(project_id, ArtifactKind.RESEARCH)
+        assert artifact is not None
+        version = uow.versions.latest(artifact.id)
+        assert version is not None
+        ReviewService(uow).approve(version.id)
+
+
 class TestScriptStage:
     def test_topic_to_awaiting_approval(
         self,
@@ -100,6 +142,7 @@ class TestScriptStage:
         world: dict[str, str],
     ) -> None:
         """The slice: a topic becomes a reviewable script version."""
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         assert _run_script_job(monkeypatch, sessions, job_id) is True
 
@@ -138,6 +181,7 @@ class TestScriptStage:
         makes "why does this video look like this?" unanswerable, and no later
         milestone can retrofit the answer.
         """
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, job_id)
 
@@ -146,7 +190,16 @@ class TestScriptStage:
             assert artifact is not None
             version = uow.versions.latest(artifact.id)
             assert version is not None
-            assert version.prompt_template_ref == "script/v1"
+            # **[M2-05]** Compared against the template's own ref rather than a
+            # literal. The old value was the bare string "script/v1", which
+            # stayed identical however the prompt was edited — so this
+            # assertion passed while the column recorded a name rather than a
+            # prompt. The shape check below is what makes the difference
+            # visible: a ref now carries a content digest.
+            assert version.prompt_template_ref == template_ref("script")
+            assert version.prompt_template_ref is not None
+            assert version.prompt_template_ref.startswith("script@")
+            assert "+" in version.prompt_template_ref
             assert version.provider_ref == "mock"
             assert version.meta["model"]
             assert version.generation_job_id == job_id
@@ -164,6 +217,7 @@ class TestScriptStage:
         """
         from videoforge_shared.hashing import sha256_bytes
 
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, job_id)
 
@@ -186,6 +240,7 @@ class TestScriptStage:
         world: dict[str, str],
     ) -> None:
         """The input to the S10 spend cap. Zero rows means no cap can work."""
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, job_id)
 
@@ -214,6 +269,7 @@ class TestScriptStage:
         GENERATING→AWAITING_APPROVAL when it finished. If either is missing,
         the trail has a gap exactly where someone would look.
         """
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, job_id)
 
@@ -237,6 +293,7 @@ class TestScriptStage:
         """Reject → regenerate, the loop the review UI is built around."""
         from videoforge_shared.enums import ReviewDecisionKind
 
+        _approved_research(monkeypatch, sessions, world["project_id"])
         first_job = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, first_job)
 
@@ -297,6 +354,7 @@ class TestAutoApproval:
             assert series is not None
             series.auto_approve_policy = policy.to_jsonb()
 
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, job_id)
 
@@ -328,6 +386,7 @@ class TestAutoApproval:
         world: dict[str, str],
     ) -> None:
         """The default must be all-manual — gates are opt-out, never opt-in."""
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, job_id)
 
@@ -352,6 +411,7 @@ class TestOutboxDrain:
 
         monkeypatch.setattr(worker_db, "get_session_factory", lambda: sessions)
 
+        _approved_research(monkeypatch, sessions, world["project_id"])
         job_id = _request_script(sessions, world["project_id"])
         _run_script_job(monkeypatch, sessions, job_id)
 

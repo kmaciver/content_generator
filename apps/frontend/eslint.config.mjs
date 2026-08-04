@@ -8,7 +8,17 @@ import typescriptConfig from "eslint-config-next/typescript";
 
 // Named, not an anonymous default export (import/no-anonymous-default-export).
 const config = [
-  { ignores: [".next/**", "node_modules/**", "next-env.d.ts"] },
+  {
+    ignores: [
+      ".next/**",
+      "node_modules/**",
+      "next-env.d.ts",
+      // Playwright output: traces, screenshots and generated HTML reports.
+      "test-results/**",
+      "playwright-report/**",
+      "blob-report/**",
+    ],
+  },
   ...coreWebVitals,
   ...typescriptConfig,
 ];

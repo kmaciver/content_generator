@@ -32,16 +32,79 @@ from typing import Any, TypeVar
 
 from celery import Task
 from celery.result import AsyncResult
-from videoforge_domain.job_lifecycle import may_retry
 
+from videoforge_domain.artifact_lifecycle import ArtifactEvent, apply_event
+from videoforge_domain.job_lifecycle import may_retry
 from videoforge_persistence.models import GenerationJob
+from videoforge_persistence.projection import refresh_project_state
 from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.correlation import correlation_context
-from videoforge_shared.enums import JobStatus
+from videoforge_shared.enums import ArtifactState, JobStatus, SubjectType
 from videoforge_workers.celery_app import app
 from videoforge_workers.db import worker_unit_of_work
 
 logger = logging.getLogger(__name__)
+
+#: Whether putting a job back to QUEUED actually causes it to run again.
+#:
+#: **It does not.** Re-dispatch belongs to the reconciler (§14.4), which is
+#: still deferred, and Celery-level autoretry is not wired either. So a job
+#: parked in QUEUED sits there forever — and, because QUEUED is a *live*
+#: status, it keeps holding its idempotency key, which makes the artifact's
+#: Regenerate button a silent no-op.
+#:
+#: That chain turned one overloaded-provider response (a 529, entirely routine)
+#: into a permanently unrecoverable project. Failing terminally is the honest
+#: outcome until something re-dispatches: the operator sees FAILED and can
+#: regenerate, which is the human-in-the-loop recovery this product is built
+#: around anyway.
+#:
+#: Flip this to True in the same change that lands the reconciler. The retry
+#: *policy* (`may_retry`) is untouched and still tested — only its consumer is
+#: gated.
+_REQUEUE_IS_HONOURED = False
+
+
+def _fail_artifact(uow: UnitOfWork, artifact_id: str | None, job_id: str) -> None:
+    """Move the artifact to FAILED when its job dies.
+
+    **Missing until a real provider first returned a 400.** The job was marked
+    failed and the artifact was left in GENERATING — with no version, no error
+    on screen, and a "Generating… this page updates itself" message that was
+    never going to become true. The mock cannot fail, so nothing had exercised
+    this path since M1.
+
+    Done regardless of whether the job was re-queued. Nothing re-dispatches a
+    QUEUED job today — the reconciler (§14.4) is still deferred — so claiming a
+    retry is coming would repeat the same lie one level down. And if a retry
+    *does* arrive later, FAILED is a legal starting point: the FSM accepts
+    REGENERATE_REQUESTED from there, which is the same door the UI's Regenerate
+    button uses.
+    """
+    if artifact_id is None:
+        return
+    artifact = uow.artifacts.get(artifact_id)
+    if artifact is None:
+        return
+    state = ArtifactState(artifact.state)
+    if state is not ArtifactState.GENERATING:
+        # Someone else already moved it — a completion racing a timeout, or a
+        # second delivery. Applying the event anyway would raise, and turning a
+        # failure into a *different* failure helps nobody.
+        return
+
+    transition = apply_event(state, ArtifactEvent.GENERATION_FAILED)
+    artifact.state = transition.to_state
+    uow.audit.record_transition(
+        subject_type=SubjectType.ARTIFACT,
+        subject_id=artifact.id,
+        from_state=transition.from_state.value,
+        to_state=transition.to_state.value,
+        cause=transition.cause,
+        job_id=job_id,
+    )
+    refresh_project_state(uow, artifact.project_id)
+
 
 #: Header key for the Celery leg. Underscored (not ``X-Request-Id``) because
 #: protocol-2 message headers can surface as attribute lookups on the task
@@ -156,7 +219,9 @@ def run_job(
         with worker_unit_of_work() as uow:
             failed = uow.jobs.get(job_id)
             assert failed is not None
-            requeue = may_retry(JobStatus.FAILED, failed.attempt, failed.max_attempts)
+            requeue = _REQUEUE_IS_HONOURED and may_retry(
+                JobStatus.FAILED, failed.attempt, failed.max_attempts
+            )
             uow.jobs.mark_failed(
                 job_id,
                 {
@@ -171,6 +236,7 @@ def run_job(
                 },
                 requeue=requeue,
             )
+            _fail_artifact(uow, failed.artifact_id, job_id)
         logger.exception(
             "job failed",
             extra={

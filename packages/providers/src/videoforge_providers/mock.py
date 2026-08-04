@@ -67,7 +67,16 @@ class MockLLMProvider:
 
         parsed: dict[str, Any] | None = None
         if req.response_schema is not None:
-            parsed = {"title": f"{topic.title()}, explained", "script": body}
+            # Synthesised *from the schema* rather than hardcoded.
+            #
+            # This used to return {"title", "script"} whatever was asked for,
+            # which was invisible while script was the only structured stage
+            # and became a silent failure the moment scenes asked for
+            # something else: the stage got a well-formed object with none of
+            # its required keys, and reported "returned no scenes". A mock
+            # that ignores the contract is not exercising the offline path,
+            # it is exercising a different one.
+            parsed = _synthesise(req.response_schema, seed=seed, topic=topic, body=body)
             text = json.dumps(parsed, separators=(",", ":"))
         else:
             text = body
@@ -112,3 +121,73 @@ class MockLLMProvider:
         blob = "|".join(f"{m.role}:{m.content}" for m in req.messages)
         digest = hashlib.sha256(blob.encode()).hexdigest()
         return int(digest[:8], 16)
+
+
+def _synthesise(
+    schema: dict[str, Any], *, seed: int, topic: str, body: str, depth: int = 0
+) -> Any:
+    """Build a deterministic value satisfying ``schema``.
+
+    Covers the subset this pipeline's stages actually use — objects with typed
+    properties, arrays of those, strings and integers. Anything unrecognised
+    becomes a string, because a mock that raised on an unfamiliar schema would
+    block a new stage on updating the mock first.
+
+    Determinism is preserved by deriving every value from ``seed`` and the
+    field's own name, so the same request always produces the same object and
+    the golden tests, the seed data and the Playwright run stay stable.
+    """
+    kind = schema.get("type")
+
+    if kind == "object":
+        properties: dict[str, Any] = schema.get("properties") or {}
+        required = schema.get("required") or list(properties)
+        return {
+            name: _synthesise(
+                properties[name],
+                seed=seed + _offset(name),
+                topic=topic,
+                body=body,
+                depth=depth + 1,
+            )
+            for name in properties
+            if name in required or depth == 0
+        }
+
+    if kind == "array":
+        # Four to seven items: enough that "the third one" is meaningful, few
+        # enough that a failure message stays readable.
+        count = 4 + (seed % 4)
+        item_schema = schema.get("items") or {"type": "string"}
+        return [
+            _synthesise(
+                item_schema, seed=seed + i, topic=topic, body=body, depth=depth + 1
+            )
+            for i in range(count)
+        ]
+
+    if kind == "integer":
+        # Milliseconds is the only integer these schemas ask for, so the range
+        # is chosen to look like a scene: 2-6 seconds.
+        return 2000 + (seed % 4000)
+
+    if kind == "number":
+        return float(2000 + (seed % 4000))
+
+    if kind == "boolean":
+        return bool(seed % 2)
+
+    # Strings. At depth 0 the caller wants something script-shaped; nested, a
+    # single beat reads more like a field value than a paragraph would.
+    if depth <= 1 and len(body) > 120:
+        return body
+    return _BEATS[seed % len(_BEATS)].format(topic=topic)
+
+
+def _offset(name: str) -> int:
+    """A stable per-field nudge, so two string fields of one object differ.
+
+    Without it every string in a scene would be identical, and a bug that
+    copied narration into the visual brief would look correct.
+    """
+    return int(hashlib.sha256(name.encode()).hexdigest()[:4], 16)

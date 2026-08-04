@@ -45,7 +45,12 @@ class LLMRequest(BaseModel):
     #: offers. Empty means "the adapter's default", which is what keeps
     #: ``config/providers.yaml`` able to say ``model: ""`` and still work.
     model_hint: str = ""
-    temperature: float = 0.7
+    #: ``None`` means "whatever the provider defaults to", which is not the same as
+    #: any particular number. Newer Claude models **reject** ``temperature``
+    #: outright (`400: temperature is deprecated for this model`), so a
+    #: non-optional field with a default made every call to them fail — the
+    #: adapter had no way to tell "caller wants 0.7" from "caller said nothing".
+    temperature: float | None = None
     max_tokens: int = 4096
     #: JSON-mode schema. When set, ``LLMResult.parsed`` carries the decoded
     #: object and the consumer never parses free text — the failure mode being

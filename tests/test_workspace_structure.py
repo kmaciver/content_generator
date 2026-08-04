@@ -80,16 +80,32 @@ def test_workspace_package_imports(package: str) -> None:
 
 
 def test_domain_layer_imports_no_frameworks() -> None:
-    """domain/ stays pure: no web, ORM, broker, or HTTP dependencies."""
-    domain = REPO_ROOT / "apps" / "backend" / "src" / "videoforge" / "domain"
-    assert domain.is_dir(), "backend domain layer is missing"
+    """domain/ stays pure: no web, ORM, broker, or HTTP dependencies.
+
+    **[Fixed M2-02]** This scanned ``apps/backend/src/videoforge/domain`` — the
+    directory ADR-015 *emptied* in M1-02 when the workflow rules moved to
+    ``packages/domain``. It therefore walked one empty ``__init__.py`` and
+    passed unconditionally: the purity guarantee ADR-015's whole argument rests
+    on has not actually been checked since the day it was made.
+
+    Both paths are scanned now. The backend one stays because the placeholder
+    still exists and something re-populating it should fail here.
+    """
+    roots = [
+        REPO_ROOT / "packages" / "domain" / "src" / "videoforge_domain",
+        REPO_ROOT / "apps" / "backend" / "src" / "videoforge" / "domain",
+    ]
+    for root in roots:
+        assert root.is_dir(), f"{root.relative_to(REPO_ROOT)} is missing"
 
     violations: list[str] = []
-    for path in _python_files(domain):
-        banned = _imported_modules(path) & set(FRAMEWORKS_BANNED_FROM_DOMAIN)
-        violations.extend(
-            f"{path.relative_to(REPO_ROOT)} imports {name}" for name in sorted(banned)
-        )
+    for root in roots:
+        for path in _python_files(root):
+            banned = _imported_modules(path) & set(FRAMEWORKS_BANNED_FROM_DOMAIN)
+            violations.extend(
+                f"{path.relative_to(REPO_ROOT)} imports {name}"
+                for name in sorted(banned)
+            )
 
     assert not violations, "domain layer must stay framework-free:\n" + "\n".join(
         violations

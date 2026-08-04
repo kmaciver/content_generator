@@ -319,9 +319,18 @@ class TestArtifactUniqueness:
         Twenty image artifacts per project (§1.0.1) all share
         ``kind='image'``; only ``scene_ref`` separates them. If the constraint
         were over-tight this would fail and the whole media stage with it.
+
+        **[M2-01]** The scenes are real rows now. This test used to invent
+        ``scene_ref`` values, which was harmless while the column had no
+        foreign key and became a failure the moment it did — the FK doing
+        exactly its job on its first day.
         """
         _seed_project(db_session)
-        for i in (1, 2, 3):
+        _seed_scene_set(db_session)  # scene 1, and an image artifact for it
+
+        for i in (2, 3):
+            scene_id = f"01SC0000000000000000000{i}AA"
+            _add_scene(db_session, scene_id, index=i)
             db_session.execute(
                 sa.text(
                     "INSERT INTO artifact (id, project_id, kind, scene_ref, state)"
@@ -330,7 +339,7 @@ class TestArtifactUniqueness:
                 {
                     "id": f"01ARIMG00000000000000{i:02d}A",
                     "p": PROJECT_ID,
-                    "s": f"01SC0000000000000000000{i}AA",
+                    "s": scene_id,
                 },
             )
         count = db_session.execute(
@@ -503,3 +512,152 @@ class TestNamingConvention:
         assert "uq_artifact_version_artifact_id_version_no" in names
         assert "fk_artifact_version_artifact_id_artifact" in names
         assert "ck_artifact_version_content_in_exactly_one_place" in names
+
+
+# --------------------------------------------------------------------------- #
+# M2-01 — scene sets and scenes
+# --------------------------------------------------------------------------- #
+
+SCENE_SET_ARTIFACT_ID = "01AR00000000000000000000BB"
+SCENE_SET_VERSION_ID = "01AVSS0000000000000000000A"
+SCENE_SET_ID = "01SS00000000000000000000AA"
+SCENE_ID = "01SC00000000000000000000AA"
+IMAGE_ARTIFACT_ID = "01AR00000000000000000000CC"
+
+
+def _seed_scene_set(session: Session) -> None:
+    """script v1 → a scene_set artifact and version → one scene → its image.
+
+    The full chain, because the properties under test are all about what
+    happens *along* it: the cascade, the cycle, and the per-scene anchor.
+    """
+    script_version_id = _add_version(session, 1)
+    session.execute(
+        sa.text(
+            "INSERT INTO artifact (id, project_id, kind, state)"
+            " VALUES (:id, :p, 'scene_set', 'AWAITING_APPROVAL')"
+        ),
+        {"id": SCENE_SET_ARTIFACT_ID, "p": PROJECT_ID},
+    )
+    session.execute(
+        sa.text(
+            "INSERT INTO artifact_version"
+            " (id, artifact_id, version_no, origin, content_hash, inline_content)"
+            " VALUES (:id, :a, 1, 'generated', 'scenehash', '{}')"
+        ),
+        {"id": SCENE_SET_VERSION_ID, "a": SCENE_SET_ARTIFACT_ID},
+    )
+    session.execute(
+        sa.text(
+            "INSERT INTO scene_set (id, artifact_version_id, script_version_id)"
+            " VALUES (:id, :av, :sv)"
+        ),
+        {"id": SCENE_SET_ID, "av": SCENE_SET_VERSION_ID, "sv": script_version_id},
+    )
+    _add_scene(session, SCENE_ID, index=1)
+    session.execute(
+        sa.text(
+            "INSERT INTO artifact (id, project_id, kind, scene_ref, state)"
+            " VALUES (:id, :p, 'image', :s, 'PENDING')"
+        ),
+        {"id": IMAGE_ARTIFACT_ID, "p": PROJECT_ID, "s": SCENE_ID},
+    )
+
+
+def _add_scene(session: Session, scene_id: str, *, index: int) -> None:
+    session.execute(
+        sa.text(
+            'INSERT INTO scene (id, scene_set_id, "index", narration_text,'
+            " visual_brief, target_duration_ms)"
+            " VALUES (:id, :ss, :i, 'narration', 'a brief', 4000)"
+        ),
+        {"id": scene_id, "ss": SCENE_SET_ID, "i": index},
+    )
+
+
+class TestSceneSchema:
+    """The FK M1 deferred, and the cascade cycle adding it created."""
+
+    def test_deleting_a_scene_removes_its_per_scene_artifacts(
+        self, db_session: Session
+    ) -> None:
+        """CASCADE, not SET NULL.
+
+        SET NULL was permitted here — ``artifact`` is mutable, so finding
+        M1-04a does not apply — and would still have been wrong: it turns an
+        image artifact into one indistinguishable from a project-wide one,
+        which silently violates what finding S1's unique constraint means.
+        """
+        _seed_project(db_session)
+        _seed_scene_set(db_session)
+
+        db_session.execute(
+            sa.text("DELETE FROM scene WHERE id = :id"), {"id": SCENE_ID}
+        )
+        remaining = db_session.execute(
+            sa.text("SELECT count(*) FROM artifact WHERE id = :id"),
+            {"id": IMAGE_ARTIFACT_ID},
+        ).scalar_one()
+        assert remaining == 0
+
+    def test_project_deletion_survives_the_cascade_cycle(
+        self, db_session: Session
+    ) -> None:
+        """The M1-04a regression, re-run with a cycle in the graph.
+
+        ``artifact.scene_ref`` closes a loop: artifact → scene → scene_set →
+        artifact_version → artifact, every edge CASCADE. Postgres resolves
+        cyclic cascades at runtime, but that is a claim worth holding to,
+        because the failure mode is the M1-04a one — a project nobody can
+        delete, reported as a constraint violation on a table the operator
+        never touched.
+        """
+        _seed_project(db_session)
+        _seed_scene_set(db_session)
+
+        db_session.execute(
+            sa.text("DELETE FROM video_project WHERE id = :id"), {"id": PROJECT_ID}
+        )
+
+        for table in ("artifact", "scene", "scene_set", "artifact_version"):
+            left = db_session.execute(
+                sa.text(f"SELECT count(*) FROM {table}")  # noqa: S608 - fixed literals
+            ).scalar_one()
+            assert left == 0, f"{table} still has rows after the project was deleted"
+
+    def test_scene_index_is_unique_within_a_set(self, db_session: Session) -> None:
+        """Two scenes cannot share a position — it is what makes ORDER BY total."""
+        _seed_project(db_session)
+        _seed_scene_set(db_session)
+
+        # Positive control: the next position is fine.
+        _add_scene(db_session, "01SC00000000000000000000BB", index=2)
+
+        with pytest.raises(sa.exc.IntegrityError):
+            _add_scene(db_session, "01SC00000000000000000000CC", index=1)
+
+    def test_scene_index_is_one_based(self, db_session: Session) -> None:
+        """The SADD and the UI both say "scene 4"; index 0 would make them lie."""
+        _seed_project(db_session)
+        _seed_scene_set(db_session)
+
+        with pytest.raises(sa.exc.IntegrityError):
+            _add_scene(db_session, "01SC00000000000000000000DD", index=0)
+
+    def test_one_scene_set_per_version(self, db_session: Session) -> None:
+        """UNIQUE(artifact_version_id): "the scenes of version N" is a lookup.
+
+        Without it, a second row could attach to the same version and the
+        answer would depend on whatever order the query happened to return.
+        """
+        _seed_project(db_session)
+        _seed_scene_set(db_session)
+
+        with pytest.raises(sa.exc.IntegrityError):
+            db_session.execute(
+                sa.text(
+                    "INSERT INTO scene_set (id, artifact_version_id, script_version_id)"
+                    " VALUES ('01SS00000000000000000000BB', :av, :av)"
+                ),
+                {"av": SCENE_SET_VERSION_ID},
+            )

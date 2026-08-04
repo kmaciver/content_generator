@@ -3,7 +3,11 @@ name = "videoforge-prompts"
 version = "0.1.0"
 description = "Versioned prompt templates. Prompt text is a behavioural input, so it is versioned like code."
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    # Templating only. No provider, no database — rendering is pure, which
+    # is what lets prompt tests run in milliseconds with no fixtures.
+    "Jinja2==3.1.6",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -35,6 +35,13 @@ node_modules/
 out/
 *.tsbuildinfo
 
+# Playwright artefacts (M1-11). Traces and screenshots are retained on failure
+# for local debugging; they are large, binary, and regenerated on every run.
+/apps/frontend/test-results/
+/apps/frontend/playwright-report/
+/apps/frontend/blob-report/
+/apps/frontend/.playwright/
+
 # Generated media and local scratch. Real artefacts live in MinIO, never on disk.
 /tmp/
 /scratch/

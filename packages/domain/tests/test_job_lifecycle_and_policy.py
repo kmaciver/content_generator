@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from videoforge_domain.approval_policy import AUTO_APPROVE_KEY, ApprovalPolicy
 from videoforge_domain.job_lifecycle import (
     IllegalJobTransitionError,
@@ -12,7 +13,6 @@ from videoforge_domain.job_lifecycle import (
     may_retry,
     next_status_after_failure,
 )
-
 from videoforge_shared.enums import ArtifactKind, JobStatus
 
 

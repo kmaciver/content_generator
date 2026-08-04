@@ -49,7 +49,6 @@ class SeriesRepository(Repository):
         *,
         workspace_id: str,
         title: str,
-        style_preset: dict[str, Any] | None = None,
         voice_preset: dict[str, Any] | None = None,
         music_policy: dict[str, Any] | None = None,
         auto_approve_policy: dict[str, Any] | None = None,
@@ -59,7 +58,6 @@ class SeriesRepository(Repository):
             id=new_ulid(),
             workspace_id=workspace_id,
             title=title,
-            style_preset=style_preset or {},
             voice_preset=voice_preset or {},
             music_policy=music_policy or {},
             # Empty means all-manual — see ``ApprovalPolicy.from_jsonb``.

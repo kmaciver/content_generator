@@ -77,7 +77,10 @@ app.conf.update(
         "videoforge_workers.ping",
         "videoforge_workers.render",
         "videoforge_workers.outbox",
+        "videoforge_workers.research",
         "videoforge_workers.script",
+        "videoforge_workers.scenes",
+        "videoforge_workers.prompts_stage",
     ),
     # ------------------------------------------------------------------ #
     # Beat

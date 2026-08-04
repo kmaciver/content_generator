@@ -20,10 +20,11 @@ from videoforge_domain.artifact_lifecycle import (
     Transition,
     apply_event,
 )
-
 from videoforge_persistence.models import Artifact, ArtifactVersion
+from videoforge_persistence.projection import refresh_project_state
 from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.enums import (
+    ArtifactKind,
     ArtifactState,
     ReviewDecisionKind,
     SubjectType,
@@ -110,6 +111,11 @@ class ReviewService:
         self._uow.projects.set_active_pointer(
             artifact.project_id, artifact.kind.value, version.id
         )
+        # An approval is the one transition that invalidates other artifacts
+        # (finding S2), so it is the one that passes ``approved_kind``.
+        refresh_project_state(
+            self._uow, artifact.project_id, approved_kind=ArtifactKind(artifact.kind)
+        )
         return ReviewOutcome(artifact=artifact, version=version)
 
     def reject(
@@ -131,6 +137,10 @@ class ReviewService:
         )
         artifact.state = transition.to_state
         self._record(artifact, version, transition, actor_id, "artifact.rejected")
+        # No cascade: rejecting invalidates nothing downstream, because nothing
+        # downstream was ever built on a version that was never approved. The
+        # phase still moves — §12.4's "rollback is just rejecting a version".
+        refresh_project_state(self._uow, artifact.project_id)
         return ReviewOutcome(artifact=artifact, version=version)
 
     def edit(
@@ -168,6 +178,7 @@ class ReviewService:
         )
         artifact.state = transition.to_state
         self._record(artifact, version, transition, actor_id, "artifact.edited")
+        refresh_project_state(self._uow, artifact.project_id)
         return ReviewOutcome(artifact=artifact, version=version)
 
     def comment(

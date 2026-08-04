@@ -45,6 +45,27 @@ class JobRepository(Repository):
             sa.select(GenerationJob).where(GenerationJob.idempotency_key == key)
         ).one_or_none()
 
+    def live_by_idempotency_key(self, key: str) -> GenerationJob | None:
+        """The job currently *holding* ``key``, if any.
+
+        A job that ended badly releases its key (see
+        ``GenerationJob._DEAD_STATUSES``), so this is the lookup that pairs
+        with the partial unique index. ``by_idempotency_key`` still returns
+        history, which is what an operator asking "what happened to this
+        request?" wants.
+        """
+        return self.session.scalars(
+            sa.select(GenerationJob)
+            .where(
+                GenerationJob.idempotency_key == key,
+                GenerationJob.status.not_in(
+                    [JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.ORPHANED]
+                ),
+            )
+            .order_by(GenerationJob.created_at.desc())
+            .limit(1)
+        ).one_or_none()
+
     def reserve(
         self,
         *,
@@ -66,7 +87,10 @@ class JobRepository(Repository):
         deliveries arrive *close together*, which is exactly when it is open.
 
         The unique index on ``idempotency_key`` is what makes this atomic;
-        this method just declines to fight it.
+        this method just declines to fight it. The index is **partial** —
+        it covers live jobs only — so a request whose previous attempt died
+        can be made again, while a redelivery of a SUCCEEDED job still
+        collides (§14.3).
         """
         values = {
             "id": new_ulid(),
@@ -82,14 +106,26 @@ class JobRepository(Repository):
         stmt = (
             pg_insert(GenerationJob)
             .values(**values)
-            .on_conflict_do_nothing(index_elements=[GenerationJob.idempotency_key])
+            # `index_where` must match the partial index exactly, or Postgres
+            # cannot infer which index the conflict clause means and raises
+            # "there is no unique or exclusion constraint matching".
+            .on_conflict_do_nothing(
+                index_elements=[GenerationJob.idempotency_key],
+                index_where=sa.text(
+                    "status NOT IN ('FAILED', 'CANCELLED', 'ORPHANED')"
+                ),
+            )
             .returning(GenerationJob.id)
         )
         inserted_id = self.session.execute(stmt).scalar_one_or_none()
 
         if inserted_id is None:
             # Someone else owns this key. Their row is the job.
-            existing = self.by_idempotency_key(idempotency_key)
+            # Only a *live* job can hold the key now, so this cannot return a
+            # dead one — but the lookup filters anyway, because
+            # `by_idempotency_key` is used elsewhere and a caller that got a
+            # FAILED job back here would report it as the reservation.
+            existing = self.live_by_idempotency_key(idempotency_key)
             if existing is None:  # pragma: no cover - needs real concurrency
                 # The conflicting row exists but is not visible to this
                 # transaction — a concurrent insert that has not committed.

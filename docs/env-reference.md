@@ -122,7 +122,8 @@ Leave blank while `PROVIDERS__MODE=mock`.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `DAILY_COST_LIMIT_USD` | `10.00` | Job creation is refused once the day's recorded spend exceeds this. At ~20 images per video this is a real guard against a regeneration loop, not a theoretical one. |
+| `DAILY_COST_LIMIT` | `10.00` | Job creation is refused once the day's *estimated* spend exceeds this. At ~20 images per video this is a real guard against a regeneration loop, not a theoretical one. **Not yet enforced** — the `daily_spend` counter lands with M3-11 (S10). |
+| `COST_CURRENCY` | `USD` | ISO 4217 code the limit and all estimates are expressed in. **A label, not a conversion**: estimates come from price tables inside each adapter, and vendors publish those in USD. If your credits were bought in another currency, that is an FX matter between you and the vendor — it does not change what a call costs in list terms. Change this only alongside the price tables. |
 
 ## Rendering (**D4**: FFmpeg, not Remotion)
 
@@ -175,7 +176,8 @@ ANTHROPIC_API_KEY=
 ELEVENLABS_API_KEY=
 STABILITY_API_KEY=
 
-DAILY_COST_LIMIT_USD=10.00
+DAILY_COST_LIMIT=10.00
+COST_CURRENCY=USD
 
 RENDER_WIDTH=1080
 RENDER_HEIGHT=1920

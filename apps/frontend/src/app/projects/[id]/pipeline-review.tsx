@@ -5,16 +5,30 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, type ArtifactSummary } from "@/lib/api";
 import { artifactStateColor, humanise } from "@/lib/state-colors";
+import { StageContent } from "./stage-content";
+import { StageRail } from "./stage-rail";
 import { VersionSwitcher } from "./version-switcher";
 
-// Polling, not SSE. ADR-006 commits to polling first, and finding S7 defers
-// the event consumer to M5 — the outbox and its drain exist, but nothing
-// subscribes yet. 1.5s while a job is in flight, off otherwise: the interval
-// only matters when something is actually moving.
+// Polling, not SSE. ADR-006 commits to polling first, and finding S7 defers the
+// event consumer to M5 — the outbox and its drain exist, but nothing subscribes
+// yet. 1.5s while a job is in flight, off otherwise: the interval only matters
+// when something is actually moving.
 const POLL_MS = 1500;
 
-export function ScriptReview({ projectId }: { projectId: string }) {
+/** The project screen (M2-13).
+ *
+ * M1-09 shipped this as a script-only view because script was the only stage.
+ * Generalising it — rather than adding three more near-identical components —
+ * is what keeps the review contract in one place: every stage is an artifact
+ * with versions, a capabilities payload and a review decision, and the moment
+ * that stops being true for one of them the design has drifted.
+ *
+ * Which stage is *editable as text* is the one real difference, and it is
+ * derived from the content shape rather than hardcoded per kind.
+ */
+export function PipelineReview({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient();
+  const [selectedKind, setSelectedKind] = useState<string | null>(null);
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const [comment, setComment] = useState("");
@@ -28,44 +42,58 @@ export function ScriptReview({ projectId }: { projectId: string }) {
         : false,
   });
 
-  const script = project.data?.artifacts.find((a) => a.kind === "script");
+  const stages = project.data?.stages ?? [];
+  // Derived, not synchronised: default to the furthest stage that has anything
+  // to look at, and let an explicit choice override. An effect that "kept the
+  // selection up to date" would move the reviewer's focus every time a poll
+  // landed.
+  const defaultKind =
+    [...stages].reverse().find((s) => s.artifact_id)?.kind ?? null;
+  const activeKind = selectedKind ?? defaultKind;
+  const artifactSummary = project.data?.artifacts.find(
+    (a) => a.kind === activeKind && a.scene_ref === null,
+  );
 
   const artifact = useQuery({
-    queryKey: ["artifact", script?.id],
-    queryFn: () => api.getArtifact(script!.id),
-    enabled: Boolean(script),
-    refetchInterval: script?.state === "GENERATING" ? POLL_MS : false,
+    queryKey: ["artifact", artifactSummary?.id],
+    queryFn: () => api.getArtifact(artifactSummary!.id),
+    enabled: Boolean(artifactSummary),
+    // Polls on ITS OWN state, not on the project's view of it.
+    //
+    // Keying this off the project's copy was a real bug (M1-09a): the project
+    // query polls too, sees AWAITING_APPROVAL first, and that switches this
+    // query's interval off — so `capabilities` stayed frozen at the GENERATING
+    // values and Approve never enabled. The generation had finished in 222ms.
+    refetchInterval: (query) =>
+      (query.state.data?.state ?? artifactSummary?.state) === "GENERATING"
+        ? POLL_MS
+        : false,
   });
 
   const versions = artifact.data?.versions ?? [];
-  // Selection is *derived*, not synchronised. `selectedVersion` records only a
-  // deliberate choice; everything else falls through to the newest version.
-  //
-  // The obvious alternative — an effect that copies the newest version into
-  // state — is what React's `set-state-in-effect` rule exists to stop, and it
-  // would also be wrong here: it re-runs whenever a poll returns, so a
-  // regeneration landing mid-read would yank the reviewer off the version they
-  // were looking at. Setting `selectedVersion` back to null after a mutation is
-  // the explicit way to say "follow the newest again".
   const current =
     versions.find((v) => v.version_no === selectedVersion) ?? versions[0];
 
   const detail = useQuery({
-    queryKey: ["version", script?.id, current?.version_no],
-    queryFn: () => api.getVersion(script!.id, current!.version_no),
-    enabled: Boolean(script && current),
+    queryKey: ["version", artifactSummary?.id, current?.version_no],
+    queryFn: () => api.getVersion(artifactSummary!.id, current!.version_no),
+    enabled: Boolean(artifactSummary && current),
   });
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
-    void queryClient.invalidateQueries({ queryKey: ["artifact", script?.id] });
+    // The whole ["artifact"] prefix rather than one id: on a first Generate
+    // there is no artifact yet, so a targeted invalidation would address
+    // ["artifact", undefined] — a key nothing uses.
+    void queryClient.invalidateQueries({ queryKey: ["artifact"] });
     void queryClient.invalidateQueries({ queryKey: ["version"] });
   };
 
   const generate = useMutation({
-    mutationFn: (regenerate: boolean) =>
-      api.generate(projectId, "script", regenerate),
-    onSuccess: () => {
+    mutationFn: ({ kind, regenerate }: { kind: string; regenerate: boolean }) =>
+      api.generate(projectId, kind, regenerate),
+    onSuccess: (_data, variables) => {
+      setSelectedKind(variables.kind);
       setSelectedVersion(null);
       invalidate();
     },
@@ -82,9 +110,12 @@ export function ScriptReview({ projectId }: { projectId: string }) {
     },
   });
 
+  const editableField =
+    detail.data?.content?.script !== undefined ? "script" : null;
+
   const saveEdit = useMutation({
     mutationFn: (text: string) =>
-      api.edit(script!.id, {
+      api.edit(artifactSummary!.id, {
         ...(detail.data?.content ?? {}),
         script: text,
       }),
@@ -112,34 +143,34 @@ export function ScriptReview({ projectId }: { projectId: string }) {
         <h1 className="text-2xl font-semibold tracking-tight">
           {project.data.title ?? project.data.topic}
         </h1>
-        <p className="mt-1 text-sm" style={{ color: "var(--color-ink-muted)" }}>
+        <p
+          data-testid="project-phase"
+          className="mt-1 text-sm"
+          style={{ color: "var(--color-ink-muted)" }}
+        >
           {humanise(project.data.phase)}
         </p>
       </header>
 
       {error ? <Failed>{error.message}</Failed> : null}
 
-      {!script ? (
-        <section className="flex flex-col gap-3">
-          <Muted>No script yet.</Muted>
-          <button
-            type="button"
-            onClick={() => generate.mutate(false)}
-            disabled={busy}
-            className="self-start rounded-md px-4 py-2 text-sm font-medium disabled:opacity-40"
-            style={{
-              background: "var(--color-state-generating)",
-              color: "var(--color-surface)",
-            }}
-          >
-            {generate.isPending ? "Starting…" : "Generate script"}
-          </button>
-        </section>
-      ) : (
-        <section className="flex flex-col gap-5">
-          <StateBadge artifact={artifact.data ?? script} />
+      <StageRail
+        stages={stages}
+        selected={activeKind ?? ""}
+        onSelect={(kind) => {
+          setSelectedKind(kind);
+          setSelectedVersion(null);
+          setDraft(null);
+        }}
+        onGenerate={(kind, regenerate) => generate.mutate({ kind, regenerate })}
+        busy={busy}
+      />
 
-          {script.state === "GENERATING" ? (
+      {artifactSummary ? (
+        <section className="flex flex-col gap-5">
+          <StateBadge artifact={artifact.data ?? artifactSummary} />
+
+          {artifactSummary.state === "GENERATING" ? (
             <Muted>Generating… this page updates itself.</Muted>
           ) : null}
 
@@ -158,9 +189,10 @@ export function ScriptReview({ projectId }: { projectId: string }) {
               }}
             >
               {draft === null ? (
-                <p className="whitespace-pre-wrap">
-                  {String(detail.data.content?.script ?? "")}
-                </p>
+                <StageContent
+                  kind={activeKind ?? ""}
+                  content={detail.data.content}
+                />
               ) : (
                 <textarea
                   value={draft}
@@ -218,12 +250,21 @@ export function ScriptReview({ projectId }: { projectId: string }) {
                   label="Regenerate"
                   enabled={Boolean(caps?.can_regenerate) && !busy}
                   tone="var(--color-state-generating)"
-                  onClick={() => generate.mutate(true)}
+                  onClick={() =>
+                    generate.mutate({ kind: activeKind!, regenerate: true })
+                  }
                 />
                 <Action
+                  // Only where free text is the content. A scene set is a table
+                  // of rows the voice stage synthesises verbatim; a textarea
+                  // over its JSON is an invitation to desynchronise captions
+                  // from audio with no way to detect it.
                   label="Edit"
                   enabled={
-                    Boolean(caps?.can_edit) && !busy && Boolean(detail.data)
+                    Boolean(caps?.can_edit) &&
+                    !busy &&
+                    Boolean(detail.data) &&
+                    editableField !== null
                   }
                   tone="var(--color-ink-muted)"
                   onClick={() =>
@@ -249,6 +290,8 @@ export function ScriptReview({ projectId }: { projectId: string }) {
             </div>
           )}
         </section>
+      ) : (
+        <Muted>Nothing generated yet. Start with the first stage above.</Muted>
       )}
     </>
   );
@@ -256,7 +299,15 @@ export function ScriptReview({ projectId }: { projectId: string }) {
 
 function StateBadge({ artifact }: { artifact: ArtifactSummary }) {
   return (
-    <div className="flex items-center gap-2 text-sm">
+    // `aria-live` so a screen reader announces the transition when the poll
+    // lands. The testid exists because an artifact's state and a version's
+    // status legitimately share words — "Approved" appears in both — and a text
+    // locator cannot tell them apart.
+    <div
+      className="flex items-center gap-2 text-sm"
+      data-testid="artifact-state"
+      aria-live="polite"
+    >
       <span
         aria-hidden
         className="inline-block size-2 rounded-full"

@@ -7,9 +7,11 @@ host's shell, a stray .env, or the tracked config/providers.yaml.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from videoforge_shared.settings import (
     PROVIDERS_CONFIG_FILE_VAR,
@@ -31,7 +33,8 @@ _FLAT_VARS = (
     "LOG_FORMAT",
     "API_TOKEN",
     "INTERNAL_HMAC_SECRET",
-    "DAILY_COST_LIMIT_USD",
+    "DAILY_COST_LIMIT",
+    "COST_CURRENCY",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "ELEVENLABS_API_KEY",
@@ -182,3 +185,40 @@ class TestValidation:
         monkeypatch.setenv("RENDER_FPS", "thirty")
         with pytest.raises(Exception, match="fps"):
             RenderSettings()
+
+
+class TestCostSettings:
+    """M2-06: the unit is a field, not part of a field's name.
+
+    ``daily_cost_limit_usd`` invited the wrong question — an operator whose
+    provider credits were bought in CAD reasonably read it as "my card
+    statement". It never meant that, and no identifier ending in ``_usd`` can
+    say so.
+    """
+
+    def test_the_limit_and_its_currency_are_separate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("DAILY_COST_LIMIT", "42.50")
+        monkeypatch.setenv("COST_CURRENCY", "CAD")
+        core = CoreSettings()
+        assert core.daily_cost_limit == Decimal("42.50")
+        assert core.cost_currency == "CAD"
+
+    def test_the_default_is_usd_because_price_lists_are(self) -> None:
+        assert CoreSettings().cost_currency == "USD"
+
+    def test_a_lowercase_code_is_normalised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COST_CURRENCY", " cad ")
+        assert CoreSettings().cost_currency == "CAD"
+
+    def test_a_non_iso_code_is_rejected_at_load(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "dollars" in a cost report is a number nobody can compare across
+        deployments. Better to fail at settings load."""
+        monkeypatch.setenv("COST_CURRENCY", "dollars")
+        with pytest.raises(ValidationError):
+            CoreSettings()

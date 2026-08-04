@@ -8,6 +8,7 @@ lives, and they should be the cheapest thing to test.
 from __future__ import annotations
 
 import pytest
+
 from videoforge_domain.artifact_lifecycle import (
     ArtifactEvent,
     IllegalTransitionError,
@@ -20,7 +21,6 @@ from videoforge_domain.artifact_lifecycle import (
     is_terminal,
     legal_events,
 )
-
 from videoforge_shared.enums import ArtifactState, TransitionCause
 
 

@@ -19,16 +19,18 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from videoforge_domain.artifact_lifecycle import capabilities
 
+from videoforge_domain.artifact_lifecycle import can_regenerate, capabilities
 from videoforge_persistence.models import (
     Artifact,
     ArtifactVersion,
     GenerationJob,
     VideoProject,
 )
+from videoforge_persistence.projection import get_pipeline
 from videoforge_persistence.repositories import VersionStatusRow
 from videoforge_shared.enums import ArtifactKind, ArtifactState
+from videoforge_shared.tasks import STAGE_TASKS
 
 __all__ = [
     "ArtifactDetail",
@@ -206,12 +208,38 @@ class ProjectSummary(BaseModel):
         )
 
 
+class StageSummary(BaseModel):
+    """One pipeline stage, as the UI needs to see it (M2-13).
+
+    The DAG is server-side (ADR-009) and stays there. Without this, a client
+    wanting to know whether "Generate scenes" should be enabled would have to
+    reimplement the dependency graph in TypeScript — the same drift the
+    ``capabilities`` payload exists to prevent, one level up.
+
+    ``unmet`` is the reason, not just the fact. "Waiting on: script" is an
+    answer; a disabled button is a puzzle.
+    """
+
+    kind: str
+    queue: str
+    state: str | None = None
+    artifact_id: str | None = None
+    stale_since: datetime | None = None
+    #: Kinds that must be APPROVED before this stage may run.
+    requires: list[str] = Field(default_factory=list)
+    #: Which of those are not approved yet. Empty means runnable.
+    unmet: list[str] = Field(default_factory=list)
+    can_generate: bool = False
+
+
 class ProjectDetail(ProjectSummary):
     series_id: str | None = None
     #: A cache of the status view (B1), exposed for convenience. Clients
     #: needing certainty read each version's ``status`` instead.
     active_pointers: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
+    #: The pipeline, in dependency order, with this project's progress on it.
+    stages: list[StageSummary] = Field(default_factory=list)
 
     @classmethod
     def of_detail(
@@ -223,7 +251,76 @@ class ProjectDetail(ProjectSummary):
             series_id=project.series_id,
             active_pointers=dict(project.active_pointers or {}),
             artifacts=[ArtifactSummary.of(a) for a in artifacts],
+            stages=_stages(artifacts),
         )
+
+
+def _stages(artifacts: list[Artifact]) -> list[StageSummary]:
+    """Project the pipeline graph onto one project's artifacts.
+
+    Approval is read from ``artifact.state``, not from ``active_pointers``: the
+    pointer column is a cache (B1) and this decides whether a button is
+    enabled, which the service will then independently enforce.
+
+    Per-scene artifacts collapse to the *least advanced* of their kind, the
+    same rule phase derivation uses — nineteen approved images and one still
+    generating is not an approved image stage.
+    """
+    pipeline = get_pipeline()
+    by_kind: dict[ArtifactKind, Artifact] = {}
+    for artifact in artifacts:
+        kind = ArtifactKind(artifact.kind)
+        current = by_kind.get(kind)
+        if current is None or _rank(artifact) < _rank(current):
+            by_kind[kind] = artifact
+
+    approved = {
+        kind
+        for kind, artifact in by_kind.items()
+        if ArtifactState(artifact.state) is ArtifactState.APPROVED
+    }
+
+    summaries: list[StageSummary] = []
+    for stage in pipeline.stages:
+        found = by_kind.get(stage.produces)
+        unmet = sorted(k.value for k in pipeline.unmet(stage.produces, approved))
+        state = ArtifactState(found.state) if found else None
+        summaries.append(
+            StageSummary(
+                kind=stage.produces.value,
+                queue=stage.queue,
+                state=state.value if state else None,
+                artifact_id=found.id if found else None,
+                stale_since=found.stale_since if found else None,
+                requires=sorted(k.value for k in stage.requires),
+                unmet=unmet,
+                # A stage is runnable when its inputs are approved AND the FSM
+                # would accept the move — a stage mid-generation must not offer
+                # a second Generate.
+                can_generate=(
+                    not unmet
+                    and stage.produces in STAGE_TASKS
+                    and (
+                        state is None
+                        or can_regenerate(state)
+                        or state is ArtifactState.PENDING
+                    )
+                ),
+            )
+        )
+    return summaries
+
+
+def _rank(artifact: Artifact) -> int:
+    order = {
+        ArtifactState.FAILED: 0,
+        ArtifactState.PENDING: 1,
+        ArtifactState.GENERATING: 2,
+        ArtifactState.REJECTED: 3,
+        ArtifactState.AWAITING_APPROVAL: 4,
+        ArtifactState.APPROVED: 5,
+    }
+    return order[ArtifactState(artifact.state)]
 
 
 class JobResponse(BaseModel):

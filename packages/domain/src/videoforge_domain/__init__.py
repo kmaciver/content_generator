@@ -39,6 +39,7 @@ from videoforge_domain.job_lifecycle import (
     may_retry,
     next_status_after_failure,
 )
+from videoforge_domain.pipeline import Pipeline, PipelineError, Stage
 
 __all__ = [
     "AUTO_APPROVE_KEY",
@@ -48,6 +49,9 @@ __all__ = [
     "IllegalTransitionError",
     "JobEvent",
     "JobTransition",
+    "Pipeline",
+    "PipelineError",
+    "Stage",
     "Transition",
     "apply_event",
     "apply_job_event",

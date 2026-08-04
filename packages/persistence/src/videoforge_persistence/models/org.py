@@ -77,12 +77,18 @@ class Series(Base):
 
     Style consistency across a video's ~20 illustrations is what separates
     professional output from a slideshow (risk R7), and consistency across
-    *episodes* is what makes a series recognisable. Both are configuration,
-    so they live here and are inherited by every project in the series.
+    *episodes* is what makes a series recognisable. Both are properties of the
+    series, and are inherited by every project in it.
 
     ``auto_approve_policy`` is the ``ApprovalPolicy`` seam (SADD §11): six
     mandatory human gates per video is heavy at volume, so gates are
     configurable — defaulting, per the decision recorded in M0, to all-manual.
+
+    There is deliberately no ``style_preset`` column. It was dropped before
+    anything read it: ADR-016 puts the visual style in a series-scoped table
+    with versions and approval, and a free-form jsonb column beside it would
+    be a second source of truth for the same thing — precisely the drift that
+    record exists to prevent. The table lands in M3.
     """
 
     __tablename__ = "series"
@@ -92,7 +98,6 @@ class Series(Base):
         ULIDType, sa.ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
     )
     title: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    style_preset: Mapped[dict[str, Any]] = jsonb_col()
     voice_preset: Mapped[dict[str, Any]] = jsonb_col()
     music_policy: Mapped[dict[str, Any]] = jsonb_col()
     hashtag_template: Mapped[str | None] = mapped_column(sa.Text, nullable=True)

@@ -37,11 +37,12 @@ class TestNamingConvention:
         The inverted assertion is the one that matters now: Alembic compares
         ``Base.metadata`` against the database, so a model module that nothing
         imports is a table autogenerate will happily emit a ``DROP TABLE``
-        for. Counting the thirteen core tables (SADD §10.2) means adding a
-        model without wiring it into ``models/__init__.py`` fails here rather
-        than in a migration review.
+        for. Naming every table (SADD §10.2) means adding a model without
+        wiring it into ``models/__init__.py`` fails here rather than in a
+        migration review.
         """
         assert set(Base.metadata.tables) == {
+            # M1-01 — the thirteen core tables.
             "app_user",
             "artifact",
             "artifact_version",
@@ -55,6 +56,9 @@ class TestNamingConvention:
             "state_transition",
             "video_project",
             "workspace",
+            # M2-01 — the first structured artifact content.
+            "scene_set",
+            "scene",
         }
 
 

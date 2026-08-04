@@ -83,8 +83,32 @@ class GenerationJob(Base):
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = updated_at_col()
 
+    #: Statuses that release the idempotency key.
+    #:
+    #: A job that ended badly is not a job — it is a record that something was
+    #: attempted. Holding its key forever means the *same* request can never be
+    #: made again, so a transient provider failure (a 529, a timeout) becomes
+    #: permanent: the artifact is FAILED, the UI offers Regenerate, and the
+    #: click silently returns the dead job. Found the first day a real provider
+    #: was overloaded.
+    #:
+    #: SUCCEEDED is deliberately absent. That is the double-delivery guarantee
+    #: (§14.3, M1-04): a redelivered task whose twin already produced a version
+    #: must find the key taken.
+    _DEAD_STATUSES = ("FAILED", "CANCELLED", "ORPHANED")
+
     __table_args__ = (
-        sa.UniqueConstraint("idempotency_key"),
+        # Partial unique index rather than a plain UNIQUE: the invariant is
+        # "at most one *live* job per key", which is what the constraint was
+        # always meant to express.
+        sa.Index(
+            "uq_generation_job_live_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sa.text(
+                "status NOT IN ('FAILED', 'CANCELLED', 'ORPHANED')"
+            ),
+        ),
         # The reconciler's query (§14.4): "RUNNING and started before X".
         # Partial, because RUNNING rows are a tiny slice of the table and the
         # reconciler runs on a schedule forever.

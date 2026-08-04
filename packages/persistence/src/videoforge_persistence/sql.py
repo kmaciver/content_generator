@@ -22,6 +22,13 @@ IMMUTABLE_TABLES: tuple[str, ...] = (
     "state_transition",
     "audit_event",
     "provider_usage",
+    # M2-01. Scene content is versioned the same way script text is: editing a
+    # scene produces a new scene-set *version*, never an UPDATE. Their presence
+    # here is what makes ``artifact.scene_ref`` safe to point at — a per-scene
+    # image artifact whose scene could be rewritten underneath it would make
+    # "which scene is this an image of?" unanswerable.
+    "scene_set",
+    "scene",
 )
 
 #: **Finding M1-04a: an immutable table may never be the source of an
