@@ -18,15 +18,19 @@ from __future__ import annotations
 
 import logging
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 from pydantic import BaseModel, ValidationError
 
 from videoforge.api.deps import dispatcher, transaction
 from videoforge.api.errors import ApiError
 from videoforge.dto import (
+    ApproveManyRequest,
     ArtifactDetail,
     ArtifactSummary,
+    BatchReviewResult,
     CommentRequest,
+    ContactSheet,
+    ContactTile,
     CreateProjectRequest,
     EditContentRequest,
     GenerateRequest,
@@ -34,12 +38,17 @@ from videoforge.dto import (
     ProjectDetail,
     ProjectSummary,
     ReviewRequest,
+    SceneSummary,
+    SkippedApprovalDetail,
     VersionDetail,
     VersionSummary,
 )
+from videoforge.services.admission import AdmissionError
 from videoforge.services.jobs import JobService
 from videoforge.services.review import ReviewService, StaleVersionError
-from videoforge_domain.artifact_lifecycle import IllegalTransitionError
+from videoforge_domain.artifact_lifecycle import IllegalTransitionError, capabilities
+from videoforge_shared.enums import ArtifactKind, ArtifactState
+from videoforge_shared.settings import AppSettings
 from videoforge_shared.tasks import STAGE_TASKS
 
 logger = logging.getLogger(__name__)
@@ -122,7 +131,11 @@ def get_project(project_id: str) -> tuple[Response, int]:
         if project is None:
             raise ApiError(404, "Not found", f"no project {project_id}")
         artifacts = uow.artifacts.for_project(project_id)
-        return _ok(ProjectDetail.of_detail(project, artifacts))
+        return _ok(
+            ProjectDetail.of_detail(
+                project, artifacts, uow.scenes.for_approved_set(project_id)
+            )
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -159,7 +172,16 @@ def request_generation(project_id: str) -> tuple[Response, int]:
                 spec=spec,
                 scene_ref=body.scene_id,
                 regenerate=body.regenerate,
+                input_extra=(
+                    {"max_scenes": body.max_scenes} if body.max_scenes else None
+                ),
             )
+        except AdmissionError as exc:
+            # The stage's inputs are not approved, or the project has no
+            # branding (M3-06). Well-formed request, world not ready — 409.
+            # Ahead of IllegalTransitionError in the handler order because it
+            # is raised earlier and is the more actionable message.
+            raise ApiError(409, "Conflict", str(exc)) from exc
         except IllegalTransitionError as exc:
             # The world moved: a worker is already generating, or the artifact
             # is in a state this request does not apply to. Well-formed
@@ -211,16 +233,40 @@ def get_artifact(artifact_id: str) -> tuple[Response, int]:
         )
 
 
+def _bucket_for(kind: ArtifactKind) -> str:
+    """Which bucket a kind's bytes live in (ADR-011).
+
+    One function rather than a literal at each call site: the split is real —
+    generated *inputs* (frames, narration) go to assets, finished *outputs*
+    (renders, packages) go to artifacts — and a second copy of that rule is a
+    second thing to get wrong when a bucket moves. Text stages have no bytes
+    and never reach here.
+    """
+    settings: AppSettings = current_app.config["VIDEOFORGE_SETTINGS"]
+    if kind in (ArtifactKind.RENDER, ArtifactKind.PACKAGE):
+        return str(settings.minio.bucket_artifacts)
+    return str(settings.minio.bucket_assets)
+
+
 @projects_blueprint.get("/artifacts/<artifact_id>/versions/<int:version_no>")
 def get_version(artifact_id: str, version_no: int) -> tuple[Response, int]:
     with transaction() as uow:
+        artifact = uow.artifacts.get(artifact_id)
+        if artifact is None:
+            raise ApiError(404, "Not found", f"no artifact {artifact_id}")
         versions = uow.versions.history(artifact_id)
         match = next((v for v in versions if v.version_no == version_no), None)
         if match is None:
             raise ApiError(
                 404, "Not found", f"artifact {artifact_id} has no version {version_no}"
             )
-        return _ok(VersionDetail.of_detail(match, uow.versions.status_of(match.id)))
+        return _ok(
+            VersionDetail.of_detail(
+                match,
+                uow.versions.status_of(match.id),
+                bucket=_bucket_for(ArtifactKind(artifact.kind)),
+            )
+        )
 
 
 @projects_blueprint.put("/artifacts/<artifact_id>/content")
@@ -262,13 +308,23 @@ def _review(version_id: str, *, approve: bool) -> tuple[Response, int]:
     body = _body(ReviewRequest)
     with transaction() as uow:
         service = ReviewService(uow)
-        action = service.approve if approve else service.reject
         try:
-            outcome = action(
-                version_id,
-                comment=body.comment,
-                expected_version_no=body.expected_version_no,
-            )
+            if approve:
+                outcome = service.approve(
+                    version_id,
+                    comment=body.comment,
+                    expected_version_no=body.expected_version_no,
+                )
+            else:
+                # Structured reasons only reach a rejection (M3-10): they are
+                # what the next attempt's correction block is built from, and
+                # a correction derived from an approval would be nonsense.
+                outcome = service.reject(
+                    version_id,
+                    comment=body.comment,
+                    reasons=[reason.value for reason in body.reasons],
+                    expected_version_no=body.expected_version_no,
+                )
         except LookupError as exc:
             raise ApiError(404, "Not found", str(exc)) from exc
         except StaleVersionError as exc:
@@ -279,6 +335,108 @@ def _review(version_id: str, *, approve: bool) -> tuple[Response, int]:
             raise ApiError(409, "Conflict", str(exc)) from exc
         uow.flush()
         return _ok(ArtifactSummary.of(outcome.artifact))
+
+
+@projects_blueprint.get("/projects/<project_id>/contact-sheet/<kind>")
+def contact_sheet(project_id: str, kind: str) -> tuple[Response, int]:
+    """Every scene of one kind as a grid (M3-09, risk R9).
+
+    One request for twenty scenes rather than twenty. The per-scene review
+    panel still exists for the ones that need a closer look; this is the sweep.
+
+    ``pending_version_ids`` is the batch the "approve all remaining" button
+    posts back, computed here from the FSM's own ``can_approve`` — so the set
+    the client submits is exactly the set the server would allow, and nothing
+    in TypeScript re-derives it.
+    """
+    try:
+        artifact_kind = ArtifactKind(kind)
+    except ValueError as exc:
+        raise ApiError(400, "Invalid request", f"unknown kind {kind!r}") from exc
+
+    settings: AppSettings = current_app.config["VIDEOFORGE_SETTINGS"]
+    bucket = settings.minio.bucket_assets
+
+    with transaction() as uow:
+        if uow.projects.get(project_id) is None:
+            raise ApiError(404, "Not found", f"no project {project_id}")
+
+        scenes = uow.scenes.for_approved_set(project_id)
+        by_scene = {
+            artifact.scene_ref: artifact
+            for artifact in uow.artifacts.for_project(project_id)
+            if ArtifactKind(artifact.kind) is artifact_kind and artifact.scene_ref
+        }
+
+        tiles: list[ContactTile] = []
+        pending: list[str] = []
+        for scene in scenes:
+            artifact = by_scene.get(scene.id)
+            tile = ContactTile(
+                scene_id=scene.id,
+                scene_index=scene.index,
+                narration=SceneSummary.of(scene).narration,
+            )
+            if artifact is not None:
+                caps = capabilities(ArtifactState(artifact.state))
+                version = uow.versions.latest(artifact.id)
+                tile = tile.model_copy(
+                    update={
+                        "artifact_id": artifact.id,
+                        "state": artifact.state.value,
+                        "stale_since": artifact.stale_since,
+                        "capabilities": caps,
+                        "version_id": version.id if version else None,
+                        "version_no": version.version_no if version else None,
+                        # Built server-side: which bucket media lives in is a
+                        # server fact (ADR-011), and a client composing the
+                        # path would be a second place to change when it moves.
+                        "asset_url": (
+                            f"/assets/{bucket}/{version.storage_key}"
+                            if version and version.storage_key
+                            else None
+                        ),
+                    }
+                )
+                if caps.get("can_approve") and version is not None:
+                    pending.append(version.id)
+            tiles.append(tile)
+
+        return _ok(
+            ContactSheet(
+                kind=artifact_kind.value,
+                tiles=tiles,
+                total=len(tiles),
+                pending=len(pending),
+                pending_version_ids=pending,
+            )
+        )
+
+
+@projects_blueprint.post("/projects/<project_id>/reviews/approve-remaining")
+def approve_remaining(project_id: str) -> tuple[Response, int]:
+    """Approve a set of versions in one transaction (M3-09).
+
+    200 even when some were skipped: partial success is the honest outcome,
+    and the body says which ones and why. Failing the whole batch would make
+    one raced tile cost the reviewer the entire pass.
+    """
+    body = _body(ApproveManyRequest)
+    with transaction() as uow:
+        if uow.projects.get(project_id) is None:
+            raise ApiError(404, "Not found", f"no project {project_id}")
+        outcome = ReviewService(uow).approve_many(
+            body.version_ids, comment=body.comment
+        )
+        uow.flush()
+        result = BatchReviewResult(
+            approved=len(outcome.approved),
+            skipped=[
+                SkippedApprovalDetail(version_id=s.version_id, reason=s.reason)
+                for s in outcome.skipped
+            ],
+        )
+    return _ok(result)
 
 
 @projects_blueprint.post("/artifact-versions/<version_id>/comments")

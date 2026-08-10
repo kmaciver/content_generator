@@ -23,12 +23,14 @@ from videoforge_persistence.repositories import (
     ArtifactRepository,
     ArtifactVersionRepository,
     AuditRepository,
+    BrandingRepository,
     CommentRepository,
     JobRepository,
     OutboxRepository,
     ProjectRepository,
     ProviderUsageRepository,
     ReviewRepository,
+    SceneRepository,
     SeriesRepository,
     WorkspaceRepository,
 )
@@ -71,6 +73,14 @@ class UnitOfWork:
     @cached_property
     def versions(self) -> ArtifactVersionRepository:
         return ArtifactVersionRepository(self.session)
+
+    @cached_property
+    def scenes(self) -> SceneRepository:
+        return SceneRepository(self.session)
+
+    @cached_property
+    def branding(self) -> BrandingRepository:
+        return BrandingRepository(self.session)
 
     @cached_property
     def jobs(self) -> JobRepository:

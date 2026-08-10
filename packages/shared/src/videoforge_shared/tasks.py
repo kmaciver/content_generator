@@ -23,14 +23,19 @@ from videoforge_shared.enums import ArtifactKind
 
 __all__ = [
     "DRAIN_OUTBOX",
+    "IMAGES_GENERATE",
+    "VOICE_GENERATE",
     "PING",
     "PROMPTS_GENERATE",
     "RECONCILE_JOBS",
+    "REFERENCES_GENERATE",
     "RESEARCH_GENERATE",
     "SCENES_GENERATE",
+    "RENDER_GENERATE",
     "RENDER_HELLO",
     "SCRIPT_GENERATE",
     "STAGE_TASKS",
+    "TIMELINE_COMPILE",
     "TaskSpec",
 ]
 
@@ -56,6 +61,26 @@ SCRIPT_GENERATE = TaskSpec("script.generate", "llm")
 SCENES_GENERATE = TaskSpec("scenes.generate", "llm")
 PROMPTS_GENERATE = TaskSpec("prompts.generate", "llm")
 
+#: M3-07. On the ``image`` queue with ``references.generate``, sharing the
+#: concurrency limit that stops a slow, expensive modality starving the cheap
+#: ones (§14.1).
+IMAGES_GENERATE = TaskSpec("image.generate", "image")
+
+#: M3-12. **Not** per-scene, unlike images: B3 revised requires one synthesis
+#: call for the whole script, because twenty sentences read in isolation
+#: concatenate into a list of statements rather than a narration.
+VOICE_GENERATE = TaskSpec("voice.generate", "voice")
+
+#: M4-08. On its own queue rather than ``llm``: the compile itself is pure and
+#: takes milliseconds, but it must not queue behind a two-minute script
+#: generation to tell a waiting reviewer that a scene has no approved frame.
+TIMELINE_COMPILE = TaskSpec("timeline.compile", "timeline")
+
+#: M4-09. The ``render`` queue exists so a two-minute encode cannot occupy the
+#: worker that a cheap stage is waiting on — the concurrency argument of §14.1,
+#: at its most extreme.
+RENDER_GENERATE = TaskSpec("render.generate", "render")
+
 #: Which task produces which artifact kind.
 #:
 #: Here rather than in the API because two callers need it and neither may own
@@ -68,7 +93,16 @@ STAGE_TASKS: dict[ArtifactKind, TaskSpec] = {
     ArtifactKind.SCRIPT: SCRIPT_GENERATE,
     ArtifactKind.SCENE_SET: SCENES_GENERATE,
     ArtifactKind.PROMPT: PROMPTS_GENERATE,
+    ArtifactKind.IMAGE: IMAGES_GENERATE,
+    ArtifactKind.VOICE: VOICE_GENERATE,
+    ArtifactKind.TIMELINE: TIMELINE_COMPILE,
+    ArtifactKind.RENDER: RENDER_GENERATE,
 }
+
+#: Series-scoped branding (M3-04b). On the ``image`` queue because it is image
+#: generation and must share the concurrency limit that keeps a slow, expensive
+#: modality from starving the cheap ones (§14.1).
+REFERENCES_GENERATE = TaskSpec("references.generate", "image")
 
 #: Infrastructure tasks.
 DRAIN_OUTBOX = TaskSpec("outbox.drain", "events")

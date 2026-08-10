@@ -30,6 +30,7 @@ import os
 from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
+from math import gcd
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -195,6 +196,36 @@ class RenderSettings(BaseSettings):
     crf: int = 20
     preset: str = "medium"
 
+    @property
+    def aspect_ratio(self) -> str:
+        """``1080×1920`` → ``"9:16"``.
+
+        Derived rather than configured, so it can never disagree with the
+        pixels the renderer actually writes. Image providers take a *ratio*,
+        not a size (B2): they render at their own native resolutions, and
+        asking for the nearest native ratio then normalising beats asking for
+        pixels no provider offers and receiving an upscale.
+        """
+        if self.width <= 0 or self.height <= 0:
+            return "9:16"
+        divisor = gcd(self.width, self.height)
+        return f"{self.width // divisor}:{self.height // divisor}"
+
+    @property
+    def orientation(self) -> str:
+        """``vertical``, ``horizontal`` or ``square``, for prompt text.
+
+        The stage that *writes* image briefs needs this in words: measured on
+        2026-08-08, a brief describing a top-down still life of two objects —
+        a square composition — produced an image boxed inside a drawn border
+        with paper filling the rest of the tall frame. The model was not
+        adding a border so much as declining to invent content for a shape the
+        brief never considered.
+        """
+        if self.width == self.height:
+            return "square"
+        return "vertical" if self.height > self.width else "horizontal"
+
 
 class LLMProviderConfig(BaseModel):
     adapter: str = "mock"
@@ -205,6 +236,13 @@ class LLMProviderConfig(BaseModel):
 class ImageProviderConfig(BaseModel):
     adapter: str = "mock"
     model: str = ""
+    #: Minimum reference images the adapter must accept, checked at
+    #: configuration time (M3-01, ADR-016). One is what character consistency
+    #: needs; ``0`` disables the check for deployments doing non-character
+    #: work — abstract or diagram-only videos have no recurring character to
+    #: keep consistent, and forcing them to patch source would be a rule people
+    #: route around rather than follow.
+    min_reference_images: int = 1
 
 
 class VoiceProviderConfig(BaseModel):
@@ -268,6 +306,11 @@ class ProviderKeys(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     elevenlabs_api_key: SecretStr | None = None
     stability_api_key: SecretStr | None = None
+    #: Gemini (M3-04). Named ``GOOGLE_API_KEY`` rather than ``GEMINI_API_KEY``
+    #: because that is the variable Google's own SDK reads by default — one
+    #: name, so an operator who already exports it for another tool does not
+    #: have to keep a second copy under a name only this project knows.
+    google_api_key: SecretStr | None = None
 
     @field_validator("*", mode="before")
     @classmethod

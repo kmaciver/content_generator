@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import sqlalchemy as sa
 
-from videoforge_persistence.models import Comment, ReviewDecision
+from videoforge_persistence.models import ArtifactVersion, Comment, ReviewDecision
 from videoforge_persistence.repositories.base import Repository, affected_rows
 from videoforge_shared.enums import ReviewDecisionKind
 from videoforge_shared.ids import new_ulid
@@ -29,6 +30,7 @@ class ReviewRepository(Repository):
         decision: ReviewDecisionKind,
         reviewer_id: str | None = None,
         comment: str | None = None,
+        reasons: Sequence[str] | None = None,
     ) -> ReviewDecision:
         row = ReviewDecision(
             id=new_ulid(),
@@ -36,9 +38,37 @@ class ReviewRepository(Repository):
             decision=decision,
             reviewer_id=reviewer_id,
             comment=comment,
+            reasons=list(reasons or []),
         )
         self.session.add(row)
         return row
+
+    def last_rejection(self, artifact_id: str) -> ReviewDecision | None:
+        """The most recent REJECT across every version of an artifact (M3-10).
+
+        **Across versions, not for one version.** A regeneration produces a new
+        version, and the rejection that prompted it belongs to the previous
+        one — so a per-version lookup would find nothing at exactly the moment
+        the correction is needed.
+
+        Newest first by ``decided_at`` then ``id``, matching the ordering the
+        status view uses, so "the last rejection" means the same thing here as
+        it does there.
+        """
+        stmt = (
+            sa.select(ReviewDecision)
+            .join(
+                ArtifactVersion,
+                ArtifactVersion.id == ReviewDecision.artifact_version_id,
+            )
+            .where(
+                ArtifactVersion.artifact_id == artifact_id,
+                ReviewDecision.decision == ReviewDecisionKind.REJECT,
+            )
+            .order_by(ReviewDecision.decided_at.desc(), ReviewDecision.id.desc())
+            .limit(1)
+        )
+        return self.session.scalars(stmt).one_or_none()
 
     def for_version(self, artifact_version_id: str) -> list[ReviewDecision]:
         """Newest first. Every decision, not just the effective one — the

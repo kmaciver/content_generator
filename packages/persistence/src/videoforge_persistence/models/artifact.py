@@ -171,7 +171,16 @@ class ArtifactVersion(Base):
     content_hash: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     #: Small structured content (a script, a scene list) stored in-row rather
     #: than round-tripping to object storage for a few kilobytes.
-    inline_content: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    #:
+    #: ``none_as_null`` is load-bearing, not style. SQLAlchemy's JSON types
+    #: render Python ``None`` as the JSON value ``null`` by default, which is
+    #: *not* SQL NULL — so a media version written with ``inline_content=None``
+    #: would leave both columns non-null and be rejected by the CHECK below.
+    #: That made the storage-backed path unreachable until M3-07 tried to use
+    #: it; every earlier stage stores inline content and never hit it.
+    inline_content: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     meta: Mapped[dict[str, Any]] = jsonb_col()
     #: Pins for reproducibility (§10.3 rule 4): which prompt template and
     #: which provider/model produced this exact content.

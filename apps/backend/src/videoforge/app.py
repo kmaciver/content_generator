@@ -19,6 +19,7 @@ from videoforge.api.errors import register_error_handlers
 from videoforge.api.health import health_blueprint
 from videoforge.api.middleware import register_request_middleware
 from videoforge.api.projects import projects_blueprint
+from videoforge.api.series import series_blueprint
 from videoforge.config import AppSettings, get_app_settings
 from videoforge.services.dispatch import CeleryDispatcher, TaskDispatcher
 from videoforge_persistence.engine import create_engine_from_settings, session_factory
@@ -73,5 +74,6 @@ def create_app(
     app.register_blueprint(health_blueprint, url_prefix=API_PREFIX)
     app.register_blueprint(assets_blueprint, url_prefix=API_PREFIX)
     app.register_blueprint(projects_blueprint, url_prefix=API_PREFIX)
+    app.register_blueprint(series_blueprint, url_prefix=API_PREFIX)
 
     return app

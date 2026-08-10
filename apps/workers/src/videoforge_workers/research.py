@@ -59,7 +59,7 @@ def research_body(ctx: JobContext) -> None:
         topic=project.topic,
         target_seconds=round(target_ms / 1000),
     )
-    result = llm_complete(prompt, _RESPONSE_SCHEMA)
+    result = llm_complete(ctx, prompt, _RESPONSE_SCHEMA)
 
     content = result.parsed or {
         "summary": result.text,

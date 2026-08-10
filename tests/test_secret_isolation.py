@@ -30,6 +30,7 @@ PROVIDER_KEY_VARS = {
     "ANTHROPIC_API_KEY",
     "ELEVENLABS_API_KEY",
     "STABILITY_API_KEY",
+    "GOOGLE_API_KEY",
 }
 
 # The only services that call providers, and therefore the only ones that may

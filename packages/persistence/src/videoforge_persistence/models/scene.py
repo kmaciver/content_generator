@@ -46,6 +46,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from videoforge_persistence.base import Base
 from videoforge_persistence.columns import ULIDType, created_at_col, ulid_pk
+from videoforge_persistence.enum_types import SCENE_KIND
+from videoforge_shared.enums import SceneKind
 
 
 class SceneSet(Base):
@@ -102,7 +104,29 @@ class Scene(Base):
     narration_text: Mapped[str] = mapped_column(sa.Text, nullable=False)
     #: What the illustration should show. Input to the prompt stage, never sent
     #: to an image provider directly — the prompt builder owns that translation.
+    #:
+    #: Written for card scenes too: it is what a *reviewer* reads to judge the
+    #: scene, and "a step marker" is still a description of the picture even
+    #: when no provider will draw it.
     visual_brief: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    #: M4-01 (§1.0.3). ``card`` scenes never reach an image provider — they are
+    #: rendered locally from a template, so they cost nothing and cannot drift.
+    #:
+    #: Defaulted in SQL rather than only in Python: every scene row that
+    #: existed before this column did was an illustration, and a nullable
+    #: column would push that fact into every reader instead of stating it once.
+    kind: Mapped[SceneKind] = mapped_column(
+        SCENE_KIND, nullable=False, server_default=SceneKind.ILLUSTRATION.value
+    )
+    #: The words that go **on** the card, verbatim — "Step 5", "1962", "3× more
+    #: likely". Separate from ``visual_brief`` on purpose: the brief is prose
+    #: for a reader, and a renderer that had to recover the literal text from
+    #: it would be parsing English to find a string the model already knew.
+    #:
+    #: Short by constraint. A card is a display frame, not a paragraph; text
+    #: that does not fit at card size is a scene that should have been an
+    #: illustration.
+    card_text: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     #: The scenes stage's estimate, validated in aggregate against
     #: ``video_project.settings.target_duration_ms`` (finding S11). The
     #: *authoritative* duration comes later, from the voice clip.
@@ -115,4 +139,16 @@ class Scene(Base):
         sa.UniqueConstraint("scene_set_id", "index"),
         sa.CheckConstraint("index > 0", name="scene_index_is_one_based"),
         sa.CheckConstraint("target_duration_ms > 0", name="scene_duration_is_positive"),
+        # Both directions, deliberately. A card with no text renders an empty
+        # frame; an illustration carrying card text means a stage set the kind
+        # and the text disagreed about what this scene is. Neither is
+        # recoverable downstream, and both are silent without this.
+        sa.CheckConstraint(
+            "(kind = 'card') = (card_text IS NOT NULL)",
+            name="scene_card_text_matches_kind",
+        ),
+        sa.CheckConstraint(
+            "card_text IS NULL OR char_length(card_text) BETWEEN 1 AND 60",
+            name="scene_card_text_fits_a_card",
+        ),
     )

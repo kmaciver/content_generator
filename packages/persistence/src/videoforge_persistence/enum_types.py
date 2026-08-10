@@ -22,9 +22,11 @@ from videoforge_persistence.columns import pg_enum
 from videoforge_shared.enums import (
     ArtifactKind,
     ArtifactState,
+    BrandingStatus,
     JobStatus,
     ProjectPhase,
     ReviewDecisionKind,
+    SceneKind,
     SubjectType,
     TransitionCause,
     UserRole,
@@ -46,6 +48,12 @@ REVIEW_DECISION_KIND: sa.Enum = pg_enum(
 #: module exists.
 SUBJECT_TYPE: sa.Enum = pg_enum(SubjectType, "subject_type", _META)
 TRANSITION_CAUSE: sa.Enum = pg_enum(TransitionCause, "transition_cause", _META)
+#: M3-02. Series branding lifecycle — see ``BrandingStatus`` for why it is its
+#: own type rather than a reuse of ``artifact_state``.
+BRANDING_STATUS: sa.Enum = pg_enum(BrandingStatus, "branding_status", _META)
+#: M4-01 (§1.0.3). Whether a scene is drawn by a provider or rendered locally
+#: from a template.
+SCENE_KIND: sa.Enum = pg_enum(SceneKind, "scene_kind", _META)
 
 #: Every type, for the migration to create and drop in one pass.
 ALL_ENUM_TYPES: tuple[sa.Enum, ...] = (
@@ -58,4 +66,6 @@ ALL_ENUM_TYPES: tuple[sa.Enum, ...] = (
     REVIEW_DECISION_KIND,
     SUBJECT_TYPE,
     TRANSITION_CAUSE,
+    BRANDING_STATUS,
+    SCENE_KIND,
 )

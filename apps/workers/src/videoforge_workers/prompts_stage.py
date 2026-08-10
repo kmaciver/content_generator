@@ -26,10 +26,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from videoforge_persistence.models import Artifact, Scene, SceneSet
+from videoforge_persistence.models import Artifact
 from videoforge_prompts import render, template_ref
 from videoforge_providers.models import LLMResult
 from videoforge_shared.enums import ArtifactKind, ArtifactState
+from videoforge_shared.settings import load_worker_settings
 from videoforge_shared.tasks import PROMPTS_GENERATE
 from videoforge_workers.skeleton import JobContext, videoforge_task
 from videoforge_workers.stages import complete_generation, llm_complete, load_artifact
@@ -54,9 +55,11 @@ def prompts_body(ctx: JobContext) -> None:
     """Generate one prompt artifact per scene of the approved scene set."""
     trigger = load_artifact(ctx)
     project_id = trigger.project_id
-    scenes = _approved_scenes(ctx, project_id)
+    scenes = ctx.uow.scenes.for_approved_set(project_id)
     if not scenes:
         raise RuntimeError(f"no approved scene set for project {project_id}")
+
+    render_settings = load_worker_settings().render
 
     manifest: list[dict[str, Any]] = []
     for scene in scenes:
@@ -67,8 +70,15 @@ def prompts_body(ctx: JobContext) -> None:
             total=len(scenes),
             visual_brief=scene.visual_brief,
             narration=scene.narration_text,
+            # The frame's shape, from the render settings that will actually
+            # encode it. A brief written without knowing the frame is tall
+            # produces square compositions — a flat lay, a centred icon — and
+            # the image model boxes those inside a drawn border rather than
+            # invent content for the space left over (measured 2026-08-08).
+            aspect=render_settings.aspect_ratio,
+            orientation=render_settings.orientation,
         )
-        result = llm_complete(prompt, _RESPONSE_SCHEMA)
+        result = llm_complete(ctx, prompt, _RESPONSE_SCHEMA)
         content: dict[str, Any] = result.parsed or {"prompt_text": result.text}
         content["scene_index"] = scene.index
 
@@ -134,33 +144,6 @@ def _prompt_artifact(ctx: JobContext, project_id: str, scene_id: str) -> Artifac
     else:
         artifact.state = ArtifactState.GENERATING
     return artifact
-
-
-def _approved_scenes(ctx: JobContext, project_id: str) -> list[Scene]:
-    """Scenes of the approved scene-set version, in order.
-
-    Joined through ``scene_set.artifact_version_id`` rather than read from
-    the artifact's inline content: the rows are the thing the image stage will
-    reference by ``scene_ref``, and generating prompts against the JSON copy
-    would let the two drift apart in exactly the place a mismatch is invisible.
-    """
-    import sqlalchemy as sa
-
-    artifact = ctx.uow.artifacts.find(project_id, ArtifactKind.SCENE_SET)
-    if artifact is None:
-        return []
-    approved = ctx.uow.versions.approved_version(artifact.id)
-    if approved is None:
-        return []
-
-    return list(
-        ctx.uow.session.scalars(
-            sa.select(Scene)
-            .join(SceneSet, Scene.scene_set_id == SceneSet.id)
-            .where(SceneSet.artifact_version_id == approved.artifact_version_id)
-            .order_by(Scene.index)
-        )
-    )
 
 
 @videoforge_task(

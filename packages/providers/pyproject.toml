@@ -8,6 +8,10 @@ dependencies = [
     # reached only when that adapter is selected — so a mock/replay deployment
     # never touches it.
     "anthropic==0.75.0",
+    # Gemini image generation (M3-04). Imported only inside `google_adapter`,
+    # reached only when that adapter is selected — a mock or Anthropic-only
+    # deployment never loads it.
+    "google-genai==1.46.0",
     # Request/result models. No SDK type crosses this boundary (SADD §15.2).
     "pydantic==2.13.4",
     # Provider *selection* and the ProviderKeys type. Note the registry takes

@@ -20,6 +20,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from videoforge.services.admission import check_admission, resolve_branding
 from videoforge.services.dispatch import TaskDispatcher
 from videoforge_domain.artifact_lifecycle import ArtifactEvent, apply_event
 from videoforge_domain.job_lifecycle import (
@@ -29,6 +30,7 @@ from videoforge_domain.job_lifecycle import (
 )
 from videoforge_persistence.models import Artifact, GenerationJob
 from videoforge_persistence.projection import refresh_project_state
+from videoforge_persistence.repositories import ReservedJob
 from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.enums import (
     ArtifactKind,
@@ -42,6 +44,11 @@ from videoforge_shared.tasks import TaskSpec
 logger = logging.getLogger(__name__)
 
 __all__ = ["JobRequest", "JobService", "idempotency_key"]
+
+#: Kinds whose first job fixes the project's branding versions (ADR-016).
+#: Images only, matching ``admission._NEEDS_BRANDING`` — a project that never
+#: generates an image never acquires a pin, and has nothing to protect.
+_PINS_BRANDING = frozenset({ArtifactKind.IMAGE})
 
 
 def idempotency_key(task_name: str, artifact_id: str, next_version_no: int) -> str:
@@ -91,6 +98,7 @@ class JobService:
         scene_ref: str | None = None,
         actor_id: str | None = None,
         regenerate: bool = False,
+        input_extra: dict[str, Any] | None = None,
     ) -> JobRequest:
         """Reserve a job and move the artifact into GENERATING.
 
@@ -102,6 +110,16 @@ class JobService:
         commit lands and finding no job row at all.
         """
         uow = self._uow
+
+        # Admission first, before anything is written (M3-06). Two checks live
+        # here: the stage's pipeline inputs must be approved, and an image needs
+        # its series branding. Both raise ``AdmissionError`` → 409.
+        #
+        # Ahead of the idempotency reservation on purpose. A request that must
+        # not run should not consume a key — a rejected attempt would otherwise
+        # park the key on a live job row and make the *legitimate* retry, once
+        # the script is approved, look like a duplicate of the failure.
+        check_admission(uow, project_id, kind)
 
         artifact = uow.artifacts.find(project_id, kind, scene_ref)
         if artifact is None:
@@ -130,6 +148,9 @@ class JobService:
             idempotency_key=key,
             artifact_id=artifact.id,
             input_snapshot={
+                # Stage-specific inputs first, so the four fields every job
+                # needs are written last and a caller cannot displace them.
+                **(input_extra or {}),
                 "artifact_id": artifact.id,
                 "kind": kind.value,
                 "scene_ref": scene_ref,
@@ -190,6 +211,28 @@ class JobService:
             },
         )
 
+        # Pin the branding this project builds against, on the first image job
+        # and never again (ADR-016, M3-06). ``pin_branding`` is write-once in
+        # SQL, so this is safe to call on every image request — a project that
+        # already has a pin is unaffected, which is exactly what protects an
+        # episode already half-generated against a character approved since.
+        if kind in _PINS_BRANDING:
+            branding = resolve_branding(uow, project_id)
+            if not branding.pinned:
+                uow.projects.pin_branding(
+                    project_id,
+                    character_version_id=branding.character.id,
+                    style_version_id=branding.style.id,
+                )
+                logger.info(
+                    "branding pinned",
+                    extra={
+                        "project_id": project_id,
+                        "character_version_id": branding.character.id,
+                        "style_version_id": branding.style.id,
+                    },
+                )
+
         # The artifact just moved into GENERATING; the project's phase
         # follows. Inside the caller's transaction, like everything else
         # here — only the broker message waits for the commit.
@@ -197,6 +240,71 @@ class JobService:
 
         self._pending.append((spec, {"job_id": reserved.job.id}))
         return JobRequest(job=reserved.job, artifact=artifact, created=True)
+
+    def request_series_job(
+        self,
+        *,
+        series_id: str,
+        spec: TaskSpec,
+        idempotency_key_suffix: str,
+        input_snapshot: dict[str, Any] | None = None,
+        actor_id: str | None = None,
+    ) -> ReservedJob:
+        """Reserve a job that belongs to a **series**, not a project (M3-04b).
+
+        Reference-sheet generation is the only user: it produces branding every
+        episode consumes, so there is no project whose phase should move and no
+        artifact to put into GENERATING. What it *does* need is everything else
+        a job carries — idempotency, the audit trail, orphan recovery, and
+        above all ``provider_usage`` rows, since a candidate run is the most
+        expensive thing in the system and must land inside the S10 cap.
+
+        Deliberately a separate method rather than ``request`` with optional
+        arguments. The two share a reservation and nothing else: this one has
+        no artifact FSM to advance, no pipeline admission to check, and no
+        phase to recompute — three of the four things ``request`` exists to do.
+        Folding them together would mean a method whose body is mostly
+        ``if project_id is not None``.
+        """
+        uow = self._uow
+        # The caller supplies the suffix because *it* knows what makes two
+        # requests the same intent — for references, the character version the
+        # sheets are being generated for.
+        key = f"{spec.name}:series:{series_id}:{idempotency_key_suffix}"
+        reserved = uow.jobs.reserve(
+            series_id=series_id,
+            task_name=spec.name,
+            queue=spec.queue,
+            idempotency_key=key,
+            input_snapshot=input_snapshot or {},
+        )
+
+        if not reserved.created:
+            logger.info(
+                "duplicate series job request ignored",
+                extra={"idempotency_key": key, "job_id": reserved.job.id},
+            )
+            return reserved
+
+        uow.audit.record_event(
+            event_type="job.requested",
+            subject_type=SubjectType.JOB,
+            subject_id=reserved.job.id,
+            actor_id=actor_id,
+            payload={
+                "task": spec.name,
+                "queue": spec.queue,
+                "series_id": series_id,
+                **(input_snapshot or {}),
+            },
+        )
+        uow.outbox.enqueue(
+            event_type="job.requested",
+            payload={"job_id": reserved.job.id, "series_id": series_id},
+        )
+
+        self._pending.append((spec, {"job_id": reserved.job.id}))
+        return reserved
 
     def dispatch_pending(self) -> None:
         """Publish the messages queued by :meth:`request`. **Call after commit.**

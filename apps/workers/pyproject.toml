@@ -20,6 +20,16 @@ dependencies = [
     # M1-06/07: stage tasks call providers. Workers are the ONLY tier that
     # does — provider keys never reach the API or the frontend (NF8).
     "videoforge-providers",
+    # M4-02: card scenes (§1.0.3) are rendered here rather than bought from an
+    # image provider. Pillow rather than ffmpeg's drawtext because the output
+    # must be byte-identical for identical input — that is what makes a card
+    # an ordinary content-addressed artifact — and a filter-graph string is a
+    # much harder thing to make that claim about.
+    "pillow>=11,<12",
+    # M4-08: the timeline compiler, behind the task skeleton. Pure and
+    # dependency-light — the stage gathers approved versions and hands them
+    # over; every decision about clip windows and captions lives in there.
+    "videoforge-timeline",
 ]
 
 # Celery arrives with M0-08; providers/prompts/timeline with M2-M4. Kept empty

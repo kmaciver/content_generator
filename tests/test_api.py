@@ -26,7 +26,7 @@ from videoforge_persistence.uow import unit_of_work
 from videoforge_shared.enums import ArtifactKind, ArtifactState, VersionOrigin
 from videoforge_shared.ids import new_ulid
 from videoforge_shared.settings import load_app_settings
-from videoforge_shared.tasks import SCRIPT_GENERATE
+from videoforge_shared.tasks import RESEARCH_GENERATE
 
 pytestmark = pytest.mark.integration
 
@@ -119,7 +119,7 @@ class TestGeneration:
         """The API never generates — it returns a receipt (§19.2)."""
         project_id = _create_project(client)
         response = client.post(
-            f"/api/v1/projects/{project_id}/generations", json={"stage": "script"}
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
         )
         assert response.status_code == 202
         body = response.get_json()
@@ -128,7 +128,7 @@ class TestGeneration:
 
         assert len(dispatcher.sent) == 1
         spec, kwargs = dispatcher.sent[0]
-        assert spec == SCRIPT_GENERATE
+        assert spec == RESEARCH_GENERATE
         assert kwargs == {"job_id": body["job_id"]}
 
     def test_duplicate_request_does_not_dispatch_twice(
@@ -140,10 +140,10 @@ class TestGeneration:
         """The double-click. One intent, one job, one broker message."""
         project_id = _create_project(client)
         first = client.post(
-            f"/api/v1/projects/{project_id}/generations", json={"stage": "script"}
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
         ).get_json()
         second = client.post(
-            f"/api/v1/projects/{project_id}/generations", json={"stage": "script"}
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
         ).get_json()
 
         assert first["job_id"] == second["job_id"]
@@ -154,11 +154,23 @@ class TestGeneration:
     def test_unimplemented_stage_is_400_with_options(
         self, client: FlaskClient, workspace: str
     ) -> None:
-        """M2+ stages are not wired yet. Better a 400 naming what exists than
-        a message on a queue nothing consumes."""
+        """Later stages are not wired yet. Better a 400 naming what exists than
+        a message on a queue nothing consumes.
+
+        ``package`` rather than ``image``, ``voice`` or ``timeline``: M3-07,
+        M3-12 and M4-08 implemented those in turn, and this test must name a
+        stage genuinely absent from ``STAGE_TASKS`` or it stops testing the 400
+        path at all. An implemented stage on a bare project answers 409 instead
+        — the admission check talking, which is a different rule with its own
+        tests.
+
+        This is the third time this test has had to move, which is the signal
+        that it is doing its job: it fails the moment its own premise stops
+        being true, rather than passing for the wrong reason.
+        """
         project_id = _create_project(client)
         response = client.post(
-            f"/api/v1/projects/{project_id}/generations", json={"stage": "image"}
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "package"}
         )
         assert response.status_code == 400
         assert "script" in response.get_json()["detail"]
@@ -166,7 +178,7 @@ class TestGeneration:
     def test_job_status_is_readable(self, client: FlaskClient, workspace: str) -> None:
         project_id = _create_project(client)
         job_id = client.post(
-            f"/api/v1/projects/{project_id}/generations", json={"stage": "script"}
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
         ).get_json()["job_id"]
 
         response = client.get(f"/api/v1/jobs/{job_id}")
@@ -182,14 +194,20 @@ class TestReview:
     def version(
         self, client: FlaskClient, db_engine: Engine, workspace: str
     ) -> dict[str, Any]:
-        """A project with one generated script version awaiting approval."""
+        """A project with one generated version awaiting approval.
+
+        Uses ``research`` since M3-06: it is a *root* stage, so the admission
+        gate has nothing to refuse. The review mechanics under test here are
+        identical for any stage — script would only add an approved-research
+        setup step that has nothing to do with reviewing.
+        """
         project_id = _create_project(client)
         client.post(
-            f"/api/v1/projects/{project_id}/generations", json={"stage": "script"}
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
         )
         sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
         with unit_of_work(sessions) as uow:
-            artifact = uow.artifacts.find(project_id, ArtifactKind.SCRIPT)
+            artifact = uow.artifacts.find(project_id, ArtifactKind.RESEARCH)
             assert artifact is not None
             version = uow.versions.add_version(
                 artifact,
@@ -254,7 +272,7 @@ class TestReview:
         )
         response = client.post(
             f"/api/v1/projects/{version['project_id']}/generations",
-            json={"stage": "script", "regenerate": True},
+            json={"stage": "research", "regenerate": True},
         )
         assert response.status_code == 202
         assert response.get_json()["created"] is True
@@ -320,3 +338,72 @@ class TestReview:
         body = response.get_json()
         assert body["content"]["script"] == "body"
         assert body["content_hash"] == "h1"
+
+
+class TestAssetUrls:
+    """M4-11. Which bucket a kind's bytes live in is a server fact (ADR-011)."""
+
+    def _version_with_key(
+        self,
+        client: FlaskClient,
+        db_engine: Engine,
+        kind: ArtifactKind,
+    ) -> dict[str, Any]:
+        project_id = _create_project(client)
+        sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.create(project_id, kind, None)
+            uow.flush()
+            version = uow.versions.add_version(
+                artifact,
+                origin=VersionOrigin.GENERATED,
+                content_hash="h",
+                storage_key="ab/abc/thing.bin",
+            )
+            artifact.state = ArtifactState.AWAITING_APPROVAL
+            return {"artifact_id": artifact.id, "version_no": version.version_no}
+
+    def test_a_render_points_at_the_artifacts_bucket(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """The bug this endpoint change exists for: the review screen used to
+        compose `/assets/assets/{key}` itself, which is right for images and
+        voice and **wrong for a render** — those are written to the artifacts
+        bucket, so the client's guess would have 403'd on the first video the
+        pipeline ever produced."""
+        row = self._version_with_key(client, db_engine, ArtifactKind.RENDER)
+        body = client.get(
+            f"/api/v1/artifacts/{row['artifact_id']}/versions/{row['version_no']}"
+        ).get_json()
+        assert body["asset_url"] == "/assets/artifacts/ab/abc/thing.bin"
+
+    def test_media_points_at_the_assets_bucket(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        row = self._version_with_key(client, db_engine, ArtifactKind.VOICE)
+        body = client.get(
+            f"/api/v1/artifacts/{row['artifact_id']}/versions/{row['version_no']}"
+        ).get_json()
+        assert body["asset_url"] == "/assets/assets/ab/abc/thing.bin"
+
+    def test_an_inline_version_has_no_asset_url(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """A text stage has no bytes, and a URL to nothing is worse than none:
+        the UI branches on its absence."""
+        project_id = _create_project(client)
+        sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.create(project_id, ArtifactKind.SCRIPT, None)
+            uow.flush()
+            version = uow.versions.add_version(
+                artifact,
+                origin=VersionOrigin.GENERATED,
+                content_hash="h",
+                inline_content={"script": "words"},
+            )
+            artifact.state = ArtifactState.AWAITING_APPROVAL
+            ids = (artifact.id, version.version_no)
+
+        body = client.get(f"/api/v1/artifacts/{ids[0]}/versions/{ids[1]}").get_json()
+        assert body["asset_url"] is None

@@ -30,6 +30,11 @@ from videoforge_domain.artifact_lifecycle import (
     is_terminal,
     legal_events,
 )
+from videoforge_domain.budget import (
+    BudgetExceededError,
+    check_budget,
+    remaining_budget,
+)
 from videoforge_domain.job_lifecycle import (
     IllegalJobTransitionError,
     JobEvent,
@@ -45,6 +50,7 @@ __all__ = [
     "AUTO_APPROVE_KEY",
     "ApprovalPolicy",
     "ArtifactEvent",
+    "BudgetExceededError",
     "IllegalJobTransitionError",
     "IllegalTransitionError",
     "JobEvent",
@@ -60,9 +66,11 @@ __all__ = [
     "can_regenerate",
     "can_reject",
     "capabilities",
+    "check_budget",
     "is_finished",
     "is_terminal",
     "legal_events",
     "may_retry",
     "next_status_after_failure",
+    "remaining_budget",
 ]

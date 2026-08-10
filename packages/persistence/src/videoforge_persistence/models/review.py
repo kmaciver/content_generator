@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from videoforge_persistence.base import Base
@@ -52,6 +53,21 @@ class ReviewDecision(Base):
         REVIEW_DECISION_KIND, nullable=False
     )
     comment: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    #: Structured rejection reasons (M3-10), from ``RejectionReason``.
+    #:
+    #: **A jsonb array of plain strings, not a Postgres enum array.** The
+    #: vocabulary will change as new failure modes are found, and every change
+    #: to a Postgres enum is an ``ALTER TYPE`` migration that cannot run inside
+    #: a transaction with other DDL. The domain owns the vocabulary; unknown
+    #: values read back are ignored rather than raising, so a reason retired in
+    #: a later build never makes an old artifact impossible to regenerate.
+    #:
+    #: Empty for approvals. Nothing forbids reasons on an APPROVE — "approved,
+    #: but the hands are odd" is a real thing to record — and the correction
+    #: builder only ever reads them from a REJECT.
+    reasons: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=sa.text("'[]'::jsonb")
+    )
     #: **No foreign key** (finding M1-04a). Who approved a version is the most
     #: load-bearing fact in the audit trail; erasing a user must not erase it,
     #: and ``SET NULL`` was impossible anyway against this table's trigger.

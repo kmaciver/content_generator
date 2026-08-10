@@ -5,8 +5,41 @@ nouns beat adjectives. Do not name an art style, a palette or an artist — the
 series' style block is applied separately (ADR-016), and a style named here
 would fight it and win unpredictably.
 
-No text, captions, watermarks or logos in the image. Captions are burned in
-later from the word timestamps.
+WRITE ONLY WHAT IS PRESENT. Your output goes to an image model as its positive
+prompt, and an image model reads nouns, not instructions — so any thing you
+mention it may draw, including the things you mention in order to exclude them.
+Never write "no X", "without X", "rather than X", "instead of X" or "X-free".
+Measured: a brief ending "with no divider, border, or panel separating them"
+produced an image with a drawn border. If something must be absent, say nothing
+about it at all; a separate channel handles exclusions.
+
+THE FRAME IS {{ aspect }} {{ orientation|upper }}. Compose for that shape:
+the subject and its setting fill it corner to corner. A composition that only
+works as a square — a flat lay, a top-down still life of one or two objects, a
+centred icon — leaves a {{ orientation }} frame with nothing to hold, and the
+image model resolves that by boxing the picture inside a drawn border. Give it
+{{ orientation }} depth instead: a floor and a wall, a foreground and a
+background, a figure standing in a room.
+
+Describe ONE continuous frame that runs to all four edges. When the brief
+contrasts two things, stage the contrast inside one scene — one moment, one
+place, one camera — and describe that scene plainly, by its furniture, its
+sightlines and where people stand.
+
+Keep the cast small — one or two figures, rarely three. Every extra person is
+another chance for the frame to drift, and a single figure doing one clear
+thing reads better at phone size than a room of people each doing something.
+
+Name other people by their role and their place in the frame: "a taller figure
+at the table", "another child kneeling by the bowl". Their hair, faces, skin
+and clothing are set by the series, and a brief that describes them invents a
+person who does not belong in this world.
+
+Describe objects by what they are, never by the words on them. "A notebook with
+'budget' written on the cover" asks the image model for text and it will
+oblige, badly and often mirrored. Write "a notebook" and let the narration
+carry the meaning; the same goes for labels, signs, receipts, screens and
+packaging. Captions are burned in later from the word timestamps.
 ---
 Scene {{ index }} of {{ total }}.
 

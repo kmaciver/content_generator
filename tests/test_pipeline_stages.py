@@ -12,6 +12,7 @@ that broke the real handoff.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -432,3 +433,129 @@ class TestGenerationFailure:
             row = uow.projects.get(project)
             assert row is not None
             assert ProjectPhase(row.phase) is ProjectPhase.RESEARCH_REVIEW
+
+
+class TestDailySpendCap:
+    """M3-11 / finding S10, wired into the stage path rather than the settings.
+
+    The cap was fully implemented and enforcing nothing before this milestone:
+    every ``unit_cost_estimate`` was ``0.0``, so the sum it compared against the
+    limit could never rise. These tests are about the *guard firing*, which is
+    the half that was missing.
+    """
+
+    def _spend(
+        self, sessions: sessionmaker[Session], project_id: str, amount: float
+    ) -> None:
+        """Record usage against a real job, so the row is reachable the same way
+        a genuine one is."""
+        from videoforge_shared.tasks import RESEARCH_GENERATE
+
+        with unit_of_work(sessions) as uow:
+            job = (
+                JobService(uow, RecordingDispatcher())
+                .request(
+                    project_id=project_id,
+                    kind=ArtifactKind.RESEARCH,
+                    spec=RESEARCH_GENERATE,
+                )
+                .job
+            )
+            uow.usage.record(
+                job_id=job.id,
+                provider="anthropic",
+                model="claude-sonnet-5",
+                operation="llm.complete",
+                latency_ms=10,
+                unit_cost_estimate=amount,
+            )
+
+    def test_spend_today_totals_the_estimates(
+        self, sessions: sessionmaker[Session], project: str
+    ) -> None:
+        self._spend(sessions, project, 1.25)
+        self._spend(sessions, project, 2.50)
+        with unit_of_work(sessions) as uow:
+            assert uow.usage.spend_today() == Decimal("3.75")
+
+    def test_a_stage_refuses_to_run_once_the_cap_is_reached(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        project: str,
+    ) -> None:
+        """**Before the call, not after.**
+
+        The cap exists to stop a regeneration loop, and a loop is only
+        stoppable before the next request. A post-hoc check produces a very
+        well-documented bill.
+        """
+        from videoforge_domain.budget import BudgetExceededError
+        from videoforge_shared.settings import get_worker_settings
+
+        self._spend(sessions, project, 99.0)
+        get_worker_settings.cache_clear()
+        monkeypatch.setenv("DAILY_COST_LIMIT", "10.00")
+
+        try:
+            with pytest.raises(BudgetExceededError):
+                _run(monkeypatch, sessions, project, ArtifactKind.RESEARCH)
+        finally:
+            get_worker_settings.cache_clear()
+
+    def test_the_artifact_fails_rather_than_hanging(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        project: str,
+    ) -> None:
+        """A refused job must land the artifact in FAILED.
+
+        Otherwise the cap reproduces the exact 529 failure it was written
+        alongside: a dead job, an artifact stuck in GENERATING, and a
+        Regenerate button that silently does nothing.
+        """
+        from videoforge_domain.budget import BudgetExceededError
+        from videoforge_shared.settings import get_worker_settings
+
+        self._spend(sessions, project, 99.0)
+        get_worker_settings.cache_clear()
+        monkeypatch.setenv("DAILY_COST_LIMIT", "10.00")
+
+        try:
+            with pytest.raises(BudgetExceededError):
+                _run(monkeypatch, sessions, project, ArtifactKind.RESEARCH)
+        finally:
+            get_worker_settings.cache_clear()
+
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.find(project, ArtifactKind.RESEARCH)
+            assert artifact is not None
+            assert ArtifactState(artifact.state) is ArtifactState.FAILED
+
+    def test_a_zero_limit_means_no_cap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        project: str,
+    ) -> None:
+        """A blank ``DAILY_COST_LIMIT`` reads as unset, not as "spend nothing".
+
+        A deployment that accidentally cleared it should keep working rather
+        than halting every generation with a confusing error.
+        """
+        from videoforge_shared.settings import get_worker_settings
+
+        self._spend(sessions, project, 99.0)
+        get_worker_settings.cache_clear()
+        monkeypatch.setenv("DAILY_COST_LIMIT", "0")
+
+        try:
+            _run(monkeypatch, sessions, project, ArtifactKind.RESEARCH)
+        finally:
+            get_worker_settings.cache_clear()
+
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.find(project, ArtifactKind.RESEARCH)
+            assert artifact is not None
+            assert ArtifactState(artifact.state) is ArtifactState.AWAITING_APPROVAL

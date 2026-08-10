@@ -21,6 +21,14 @@ The test drives ``run_job`` directly rather than going through Celery. The
 property under test lives in the database — the claim's compare-and-set — and
 standing up a broker to observe it would only add ways for the test to be
 wrong about something else.
+
+**Uses ``research`` rather than ``script`` since M3-06.** The property is
+stage-agnostic — it is about the job row, not about what the job produces — and
+research is a *root* stage requiring nothing approved upstream. Script gained an
+upstream in M2-09, and once the admission gate (M3-06) started enforcing it,
+requesting a script on a bare project became a 409. Fabricating an approved
+research artifact here to keep the old stage name would add setup that has
+nothing to do with double delivery.
 """
 
 from __future__ import annotations
@@ -44,7 +52,7 @@ from videoforge_shared.enums import (
     VersionOrigin,
 )
 from videoforge_shared.ids import new_ulid
-from videoforge_shared.tasks import SCRIPT_GENERATE
+from videoforge_shared.tasks import RESEARCH_GENERATE
 
 pytestmark = pytest.mark.integration
 
@@ -106,7 +114,7 @@ def _run(
     from videoforge_workers.skeleton import run_job
 
     monkeypatch.setattr(worker_db, "get_session_factory", lambda: sessions)
-    return run_job(job_id, body, task_name=SCRIPT_GENERATE.name)
+    return run_job(job_id, body, task_name=RESEARCH_GENERATE.name)
 
 
 class TestRequestIsIdempotent:
@@ -124,8 +132,8 @@ class TestRequestIsIdempotent:
                 service = JobService(uow, dispatcher)
                 outcome = service.request(
                     project_id=project,
-                    kind=ArtifactKind.SCRIPT,
-                    spec=SCRIPT_GENERATE,
+                    kind=ArtifactKind.RESEARCH,
+                    spec=RESEARCH_GENERATE,
                 )
                 job_ids.append(outcome.job.id)
                 created_flags.append(outcome.created)
@@ -153,8 +161,8 @@ class TestRequestIsIdempotent:
             with unit_of_work(sessions) as uow:
                 JobService(uow, dispatcher).request(
                     project_id=project,
-                    kind=ArtifactKind.SCRIPT,
-                    spec=SCRIPT_GENERATE,
+                    kind=ArtifactKind.RESEARCH,
+                    spec=RESEARCH_GENERATE,
                 )
 
         with unit_of_work(sessions) as uow:
@@ -177,8 +185,8 @@ class TestRequestIsIdempotent:
         for an artifact shared one key, the second generation a user asked for
         would be silently swallowed as a duplicate.
         """
-        first = idempotency_key(SCRIPT_GENERATE.name, "01ARTIFACT", 1)
-        second = idempotency_key(SCRIPT_GENERATE.name, "01ARTIFACT", 2)
+        first = idempotency_key(RESEARCH_GENERATE.name, "01ARTIFACT", 1)
+        second = idempotency_key(RESEARCH_GENERATE.name, "01ARTIFACT", 2)
         assert first != second
 
 
@@ -194,7 +202,7 @@ class TestDoubleDelivery:
         """**The test this milestone exists for.**"""
         with unit_of_work(sessions) as uow:
             outcome = JobService(uow, RecordingDispatcher()).request(
-                project_id=project, kind=ArtifactKind.SCRIPT, spec=SCRIPT_GENERATE
+                project_id=project, kind=ArtifactKind.RESEARCH, spec=RESEARCH_GENERATE
             )
             job_id = outcome.job.id
             artifact_id = outcome.artifact.id
@@ -257,7 +265,7 @@ class TestDoubleDelivery:
         """
         with unit_of_work(sessions) as uow:
             outcome = JobService(uow, RecordingDispatcher()).request(
-                project_id=project, kind=ArtifactKind.SCRIPT, spec=SCRIPT_GENERATE
+                project_id=project, kind=ArtifactKind.RESEARCH, spec=RESEARCH_GENERATE
             )
             job_id = outcome.job.id
             artifact_id = outcome.artifact.id

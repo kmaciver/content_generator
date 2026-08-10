@@ -65,7 +65,7 @@ def script_body(ctx: JobContext) -> None:
         target_seconds=round(target_ms / 1000),
         research=_as_notes(research),
     )
-    result = llm_complete(prompt, _RESPONSE_SCHEMA)
+    result = llm_complete(ctx, prompt, _RESPONSE_SCHEMA)
 
     content = result.parsed or {"title": project.topic, "script": result.text}
     complete_generation(

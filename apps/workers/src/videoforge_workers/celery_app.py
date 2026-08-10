@@ -14,7 +14,19 @@ from celery.signals import setup_logging
 
 from videoforge_shared.logging import configure_logging
 from videoforge_shared.settings import get_app_settings
-from videoforge_shared.tasks import DRAIN_OUTBOX, RENDER_HELLO, SCRIPT_GENERATE
+from videoforge_shared.tasks import (
+    DRAIN_OUTBOX,
+    IMAGES_GENERATE,
+    PROMPTS_GENERATE,
+    REFERENCES_GENERATE,
+    RENDER_GENERATE,
+    RENDER_HELLO,
+    RESEARCH_GENERATE,
+    SCENES_GENERATE,
+    SCRIPT_GENERATE,
+    TIMELINE_COMPILE,
+    VOICE_GENERATE,
+)
 
 #: The queue set (SADD §14.1 + D4's `render`). Slow media work must never
 #: starve cheap LLM calls, so these are separate queues consumed by separate
@@ -81,6 +93,11 @@ app.conf.update(
         "videoforge_workers.script",
         "videoforge_workers.scenes",
         "videoforge_workers.prompts_stage",
+        "videoforge_workers.references",
+        "videoforge_workers.images",
+        "videoforge_workers.voice",
+        "videoforge_workers.timeline_stage",
+        "videoforge_workers.render_stage",
     ),
     # ------------------------------------------------------------------ #
     # Beat
@@ -110,7 +127,23 @@ app.conf.task_routes = {
     **{f"ping.{queue}": {"queue": queue} for queue in QUEUES},
     RENDER_HELLO.name: {"queue": RENDER_HELLO.queue},
     DRAIN_OUTBOX.name: {"queue": DRAIN_OUTBOX.queue},
-    SCRIPT_GENERATE.name: {"queue": SCRIPT_GENERATE.queue},
+    # Every stage task, not just script. The table is a safety net for a
+    # caller that forgets `queue=` — one with holes in it is a net that only
+    # catches some falls, and the three M2 stages were missing until M3-04b.
+    **{
+        spec.name: {"queue": spec.queue}
+        for spec in (
+            RESEARCH_GENERATE,
+            SCRIPT_GENERATE,
+            SCENES_GENERATE,
+            PROMPTS_GENERATE,
+            REFERENCES_GENERATE,
+            IMAGES_GENERATE,
+            VOICE_GENERATE,
+            TIMELINE_COMPILE,
+            RENDER_GENERATE,
+        )
+    },
 }
 
 

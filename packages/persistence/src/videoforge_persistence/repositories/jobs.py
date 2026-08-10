@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import sqlalchemy as sa
@@ -69,10 +70,11 @@ class JobRepository(Repository):
     def reserve(
         self,
         *,
-        project_id: str,
         task_name: str,
         queue: str,
         idempotency_key: str,
+        project_id: str | None = None,
+        series_id: str | None = None,
         artifact_id: str | None = None,
         input_snapshot: dict[str, Any] | None = None,
         max_attempts: int = 3,
@@ -92,9 +94,20 @@ class JobRepository(Repository):
         can be made again, while a redelivery of a SUCCEEDED job still
         collides (§14.3).
         """
+        # Exactly one scope, matching `ck_generation_job_scope`. Checked here
+        # too rather than left to the constraint: an IntegrityError at flush
+        # names the constraint, not the call site that got it wrong, and this
+        # is a programming error rather than a data one.
+        if (project_id is None) == (series_id is None):
+            raise ValueError(
+                "a job needs exactly one of project_id or series_id; "
+                f"got project_id={project_id!r}, series_id={series_id!r}"
+            )
+
         values = {
             "id": new_ulid(),
             "project_id": project_id,
+            "series_id": series_id,
             "artifact_id": artifact_id,
             "task_name": task_name,
             "queue": queue,
@@ -293,15 +306,44 @@ class ProviderUsageRepository(Repository):
         self.session.add(usage)
         return usage
 
-    def spend_since(self, since: datetime) -> float:
-        """Total estimated spend — the input to the S10 daily cap (M3).
+    def _spend_where(self, condition: sa.ColumnElement[bool]) -> Decimal:
+        """Sum ``unit_cost_estimate`` over the matching rows.
 
         ``coalesce`` because ``sum()`` over no rows is NULL, and a cap check
         that compares NULL against a threshold silently passes.
+
+        Returns ``Decimal``, converted **via ``str``**. The column is a float,
+        and ``Decimal(0.1)`` built from a float carries the binary
+        representation error straight into a money comparison;
+        ``Decimal(str(0.1))`` does not. Far below anything that matters for a
+        spend estimate — the point is not to write the pattern that *does*
+        matter elsewhere.
         """
         total = self.session.execute(
             sa.select(
                 sa.func.coalesce(sa.func.sum(ProviderUsage.unit_cost_estimate), 0)
-            ).where(ProviderUsage.created_at >= since)
+            ).where(condition)
         ).scalar_one()
-        return float(total)
+        return Decimal(str(total))
+
+    def spend_since(self, since: datetime) -> Decimal:
+        """Total estimated spend since a caller-supplied instant."""
+        return self._spend_where(ProviderUsage.created_at >= since)
+
+    def spend_today(self) -> Decimal:
+        """Estimated spend since the start of the current **UTC** day (S10).
+
+        The boundary is computed **server-side** — ``date_trunc('day', now())``
+        — for the reason ``claim_orphans`` spells out one class up: rows are
+        stamped with the database's clock, and deriving midnight from a worker
+        container's clock would compare two clocks and call the difference
+        elapsed time. Five containers would each cap at a slightly different
+        moment, and the drift would be invisible.
+
+        UTC rather than a local zone: every timestamp in the system is
+        ``timestamptz`` and the deployment has no configured locale. An
+        operator in UTC-8 sees the cap reset mid-afternoon. Documenting that
+        beats inventing a timezone setting nobody has asked for.
+        """
+        midnight = sa.func.date_trunc("day", sa.func.now())
+        return self._spend_where(ProviderUsage.created_at >= midnight)

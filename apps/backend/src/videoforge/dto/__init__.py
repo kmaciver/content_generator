@@ -21,28 +21,52 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from videoforge_domain.artifact_lifecycle import can_regenerate, capabilities
+from videoforge_domain.rejection import RejectionReason
 from videoforge_persistence.models import (
     Artifact,
     ArtifactVersion,
+    CharacterReference,
     GenerationJob,
+    Scene,
+    Series,
+    SeriesCharacter,
+    SeriesStyle,
     VideoProject,
 )
 from videoforge_persistence.projection import get_pipeline
 from videoforge_persistence.repositories import VersionStatusRow
-from videoforge_shared.enums import ArtifactKind, ArtifactState
+from videoforge_shared.enums import (
+    ArtifactKind,
+    ArtifactState,
+    BrandingStatus,
+    SceneKind,
+)
 from videoforge_shared.tasks import STAGE_TASKS
 
 __all__ = [
+    "ApproveCharacterRequest",
+    "ApproveManyRequest",
     "ArtifactDetail",
     "ArtifactSummary",
+    "BatchReviewResult",
+    "BrandingDetail",
+    "CharacterSummary",
     "CommentRequest",
+    "ContactSheet",
+    "ContactTile",
+    "CreateCharacterRequest",
     "CreateProjectRequest",
+    "CreateStyleRequest",
     "EditContentRequest",
     "GenerateRequest",
     "JobResponse",
     "ProjectDetail",
     "ProjectSummary",
+    "ReferenceSummary",
     "ReviewRequest",
+    "SeriesSummary",
+    "SkippedApprovalDetail",
+    "StyleSummary",
     "VersionDetail",
     "VersionSummary",
 ]
@@ -72,12 +96,30 @@ class GenerateRequest(BaseModel):
     #: which FSM event is applied, so the machine can refuse a regeneration
     #: the artifact's state does not allow.
     regenerate: bool = False
+    #: Cap a per-scene fan-out at the first N scenes. Zero means every scene.
+    #:
+    #: A testing affordance for the expensive stages (M3-07): a twenty-scene
+    #: image run costs real money, and trying a convention on three scenes
+    #: first is the ordinary way to work. Carried into the job's
+    #: ``input_snapshot`` rather than read from configuration, so the record of
+    #: a run says it was limited — an environment variable would make a
+    #: five-image project and a truncated twenty-image one indistinguishable
+    #: afterwards.
+    max_scenes: int = Field(default=0, ge=0, le=1000)
 
 
 class ReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     comment: str | None = Field(default=None, max_length=4000)
+    #: Why, from a fixed vocabulary (M3-10). Validated **here**, at the
+    #: boundary, so a bad value is a 400 rather than a row the worker later
+    #: cannot interpret — while the worker still tolerates unknown strings,
+    #: because rows outlive the vocabulary that wrote them.
+    #:
+    #: Meaningful on a rejection; harmless on an approval, where "approved,
+    #: but the hands are odd" is a real thing to record.
+    reasons: list[RejectionReason] = Field(default_factory=list, max_length=9)
     #: Optimistic concurrency (§19.1). Two tabs, or a regeneration that landed
     #: while the reviewer was reading, must not let an approval apply to
     #: content nobody looked at. Optional so a script can omit it; the UI
@@ -140,10 +182,23 @@ class VersionDetail(VersionSummary):
     content_hash: str = ""
     meta: dict[str, Any] = Field(default_factory=dict)
     parent_version_id: str | None = None
+    #: Where the bytes are, for versions that have any (M4-11).
+    #:
+    #: **Built here, like ``ContactTile``'s**, and for the reason that DTO
+    #: already states: which bucket media lives in is a server fact (ADR-011).
+    #: The review screen used to compose `/assets/assets/{key}` itself, which
+    #: was right for images and voice and wrong for a **render** — those go to
+    #: the artifacts bucket, so the client's guess would have 403'd on the
+    #: first video the pipeline ever produced.
+    asset_url: str | None = None
 
     @classmethod
     def of_detail(
-        cls, version: ArtifactVersion, status: VersionStatusRow | None
+        cls,
+        version: ArtifactVersion,
+        status: VersionStatusRow | None,
+        *,
+        bucket: str | None = None,
     ) -> VersionDetail:
         summary = VersionSummary.of(version, status)
         return cls(
@@ -153,6 +208,11 @@ class VersionDetail(VersionSummary):
             content_hash=version.content_hash,
             meta=dict(version.meta or {}),
             parent_version_id=version.parent_version_id,
+            asset_url=(
+                f"/assets/{bucket}/{version.storage_key}"
+                if bucket and version.storage_key
+                else None
+            ),
         )
 
 
@@ -232,6 +292,38 @@ class StageSummary(BaseModel):
     can_generate: bool = False
 
 
+class SceneSummary(BaseModel):
+    """A scene of the approved scene set, for per-scene review (M2-13).
+
+    Sent with the project so the UI can label a scene selector without
+    fetching twenty artifacts to find out what they are about. ``narration``
+    is the label a reviewer actually recognises — "Scene 4" alone is a number.
+    """
+
+    id: str
+    index: int
+    narration: str
+    #: M4-01. ``card`` scenes have no generated image, so a UI that offered
+    #: Regenerate on one would be offering an action the worker refuses.
+    kind: str = SceneKind.ILLUSTRATION.value
+    #: The words on the card, in full — never truncated. It is at most 60
+    #: characters by constraint, and it is the entire content of the frame.
+    card_text: str | None = None
+
+    @classmethod
+    def of(cls, scene: Scene) -> SceneSummary:
+        text = scene.narration_text.strip()
+        return cls(
+            id=scene.id,
+            index=scene.index,
+            # Truncated here rather than in CSS: the wire payload for twenty
+            # scenes is otherwise the whole script again, sent on every poll.
+            narration=text if len(text) <= 90 else text[:87] + "…",
+            kind=scene.kind.value,
+            card_text=scene.card_text,
+        )
+
+
 class ProjectDetail(ProjectSummary):
     series_id: str | None = None
     #: A cache of the status view (B1), exposed for convenience. Clients
@@ -240,10 +332,15 @@ class ProjectDetail(ProjectSummary):
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     #: The pipeline, in dependency order, with this project's progress on it.
     stages: list[StageSummary] = Field(default_factory=list)
+    #: Scenes of the approved scene set, empty until one is approved.
+    scenes: list[SceneSummary] = Field(default_factory=list)
 
     @classmethod
     def of_detail(
-        cls, project: VideoProject, artifacts: list[Artifact]
+        cls,
+        project: VideoProject,
+        artifacts: list[Artifact],
+        scenes: list[Scene] | None = None,
     ) -> ProjectDetail:
         summary = ProjectSummary.of(project)
         return cls(
@@ -252,6 +349,7 @@ class ProjectDetail(ProjectSummary):
             active_pointers=dict(project.active_pointers or {}),
             artifacts=[ArtifactSummary.of(a) for a in artifacts],
             stages=_stages(artifacts),
+            scenes=[SceneSummary.of(s) for s in scenes or []],
         )
 
 
@@ -349,3 +447,235 @@ class JobResponse(BaseModel):
             started_at=job.started_at,
             finished_at=job.finished_at,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Series branding (M3-06, and the API half of M3-13)
+# --------------------------------------------------------------------------- #
+
+
+class CreateCharacterRequest(BaseModel):
+    """A new character version.
+
+    ``immutable_traits`` and ``variable_traits`` are open objects rather than a
+    fixed schema: the useful vocabulary for a reductive character convention is
+    not known yet (R7), and pinning it into Pydantic now would mean a migration
+    every time an operator finds a trait that helps. The *split* is the part
+    that matters and it is enforced by having two fields.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    immutable_traits: dict[str, Any] = Field(default_factory=dict)
+    variable_traits: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateStyleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApproveCharacterRequest(BaseModel):
+    """Approving a character optionally chooses its canonical reference sheet.
+
+    Optional because a character can be approved before any sheets exist —
+    which is the ordinary path today, with M3-04 unbuilt. Once sheets exist,
+    approving without naming a group leaves the character with no reference
+    images, and image generation then falls back to text alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reference_group_id: str | None = None
+
+
+class SeriesSummary(BaseModel):
+    id: str
+    title: str
+    created_at: datetime
+
+    @classmethod
+    def of(cls, series: Series) -> SeriesSummary:
+        return cls(id=series.id, title=series.title, created_at=series.created_at)
+
+
+class ReferenceSummary(BaseModel):
+    """One reference sheet image.
+
+    Carries the storage key rather than bytes or a signed URL: assets are
+    served by nginx via X-Accel-Redirect (ADR-011), so the client builds
+    ``/api/assets/{bucket}/{key}`` and never receives image data through the
+    API.
+    """
+
+    id: str
+    index: int
+    storage_key: str
+    pose: str
+    angle: str
+    expression: str
+    shot_type: str
+
+    @classmethod
+    def of(cls, reference: CharacterReference) -> ReferenceSummary:
+        return cls(
+            id=reference.id,
+            index=reference.index,
+            storage_key=reference.storage_key,
+            pose=reference.pose,
+            angle=reference.angle,
+            expression=reference.expression,
+            shot_type=reference.shot_type,
+        )
+
+
+class CharacterSummary(BaseModel):
+    id: str
+    version_no: int
+    name: str
+    status: str
+    immutable_traits: dict[str, Any] = Field(default_factory=dict)
+    variable_traits: dict[str, Any] = Field(default_factory=dict)
+    approved_reference_group_id: str | None = None
+    created_at: datetime
+
+    @classmethod
+    def of(cls, character: SeriesCharacter) -> CharacterSummary:
+        return cls(
+            id=character.id,
+            version_no=character.version_no,
+            name=character.name,
+            status=BrandingStatus(character.status).value,
+            immutable_traits=dict(character.immutable_traits or {}),
+            variable_traits=dict(character.variable_traits or {}),
+            approved_reference_group_id=character.approved_reference_group_id,
+            created_at=character.created_at,
+        )
+
+
+class StyleSummary(BaseModel):
+    id: str
+    version_no: int
+    name: str
+    status: str
+    fields: dict[str, Any] = Field(default_factory=dict)
+    #: The compiled block, exposed so the editor can show what the fields
+    #: actually become. Read-only: it is derived by ``compile_style_block`` and
+    #: a client that sent one back would be writing prompt text by hand, which
+    #: is the thing structured fields exist to prevent.
+    prompt_block: str = ""
+    created_at: datetime
+
+    @classmethod
+    def of(cls, style: SeriesStyle) -> StyleSummary:
+        return cls(
+            id=style.id,
+            version_no=style.version_no,
+            name=style.name,
+            status=BrandingStatus(style.status).value,
+            fields=dict(style.fields or {}),
+            prompt_block=style.prompt_block,
+            created_at=style.created_at,
+        )
+
+
+class BrandingDetail(BaseModel):
+    """A series' branding as the settings screen needs it.
+
+    ``ready`` is the server's answer to "can this series generate images yet?"
+    — the same question ``admission.resolve_branding`` answers on the write
+    path, so the UI never has to reimplement it. Same contract as
+    ``capabilities`` on an artifact, one level up.
+    """
+
+    series_id: str
+    character: CharacterSummary | None = None
+    style: StyleSummary | None = None
+    references: list[ReferenceSummary] = Field(default_factory=list)
+    characters: list[CharacterSummary] = Field(default_factory=list)
+    styles: list[StyleSummary] = Field(default_factory=list)
+    ready: bool = False
+    #: Why not, when ``ready`` is False. "Waiting on: an approved style" beats
+    #: a disabled button with no explanation — the reason S11's `unmet` exists
+    #: on `StageSummary`.
+    missing: list[str] = Field(default_factory=list)
+
+
+class ContactTile(BaseModel):
+    """One cell of the contact sheet (M3-09).
+
+    Everything the grid needs for one scene, in one row, so a twenty-scene
+    sheet is one request rather than twenty. In particular ``asset_url`` is
+    built here from the version's ``storage_key``: which bucket media lives in
+    is a server fact (ADR-011), and a client composing that path would be a
+    second place that has to change when it moves.
+    """
+
+    scene_id: str
+    scene_index: int
+    #: What the scene is about, for a caption under the thumbnail. A grid of
+    #: twenty pictures with no labels is a puzzle.
+    narration: str
+    artifact_id: str | None = None
+    state: str | None = None
+    stale_since: datetime | None = None
+    version_id: str | None = None
+    version_no: int | None = None
+    #: ``None`` when the scene has no image yet — a hole in the sheet, which is
+    #: itself the useful signal.
+    asset_url: str | None = None
+    capabilities: dict[str, bool] = Field(default_factory=dict)
+
+
+class ContactSheet(BaseModel):
+    """The whole per-scene set of one kind, as a grid (M3-09, risk R9).
+
+    ``pending_version_ids`` is the batch the "approve all remaining" button
+    submits. Computed **here** rather than in TypeScript for the reason
+    ``capabilities`` is: which versions may be approved is the FSM's answer,
+    and a client that filtered the list itself would be a second copy of the
+    rule that drifts the first time the machine changes.
+    """
+
+    kind: str
+    tiles: list[ContactTile] = Field(default_factory=list)
+    total: int = 0
+    #: How many tiles are waiting on a human right now.
+    pending: int = 0
+    pending_version_ids: list[str] = Field(default_factory=list)
+
+
+class ApproveManyRequest(BaseModel):
+    """``POST /projects/{id}/reviews/approve-remaining`` (M3-09).
+
+    ``version_ids`` is required and explicit: the client sends what it actually
+    displayed. A server-side "approve everything pending" would sweep up a
+    scene that regenerated while the reviewer was scrolling — the failure
+    ``expected_version_no`` prevents on the single-item path, reintroduced
+    twenty at a time.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version_ids: list[str] = Field(min_length=1, max_length=200)
+    comment: str | None = Field(default=None, max_length=4000)
+
+
+class SkippedApprovalDetail(BaseModel):
+    version_id: str
+    reason: str
+
+
+class BatchReviewResult(BaseModel):
+    """Partial success, stated rather than hidden.
+
+    A stale tile skips with its reason and the rest still land; the alternative
+    — failing the whole batch — makes one raced scene cost the reviewer the
+    entire pass.
+    """
+
+    approved: int = 0
+    skipped: list[SkippedApprovalDetail] = Field(default_factory=list)

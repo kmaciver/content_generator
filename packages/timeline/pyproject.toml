@@ -3,7 +3,22 @@ name = "videoforge-timeline"
 version = "0.1.0"
 description = "Pure compiler: approved artifacts -> Timeline JSON. No I/O, fully unit-testable."
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    # M4-03: the timeline schema is plain Pydantic and is the single
+    # definition. S8's JSON Schema codegen is withdrawn — with the renderer
+    # in Python (D4) the timeline crosses no language boundary, so there is
+    # nothing to keep in sync and no generator to run.
+    "pydantic==2.13.4",
+    # For SceneKind on a clip. `shared` depends on nothing, so this keeps the
+    # package importable without a database, a broker or a provider — which is
+    # the property the compiler's tests are built on.
+    "videoforge-shared",
+    # M4-04: word timings and caption grouping. `domain` is pure and depends
+    # only on `shared`, so this adds no I/O — and it is what stops the caption
+    # rule being implemented twice, once here for the burn and once in the API
+    # for the review player.
+    "videoforge-domain",
+]
 
 [build-system]
 requires = ["hatchling"]

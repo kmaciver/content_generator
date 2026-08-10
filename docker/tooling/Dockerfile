@@ -38,8 +38,15 @@ RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 # git is needed because uv and some tooling inspect repository state; without it
 # they emit confusing warnings inside the container.
+#
+# ffmpeg is here for the tests, not for the tooling. Image normalisation (M3-08,
+# finding B2) shells out to it, and without ffmpeg in this image those tests
+# skip — which is exactly the shape of gap where the arithmetic is covered and
+# the thing that actually resizes the frame is not. M4's render work needs it
+# for the same reason. `--no-install-recommends` keeps it to the codecs and
+# filters, not a desktop's worth of dependencies.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git \
+ && apt-get install -y --no-install-recommends git ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /w

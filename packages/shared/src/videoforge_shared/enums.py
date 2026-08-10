@@ -22,9 +22,11 @@ from enum import StrEnum
 __all__ = [
     "ArtifactKind",
     "ArtifactState",
+    "BrandingStatus",
     "JobStatus",
     "ProjectPhase",
     "ReviewDecisionKind",
+    "SceneKind",
     "SubjectType",
     "TransitionCause",
     "UserRole",
@@ -51,6 +53,25 @@ class ArtifactKind(StrEnum):
     RENDER = "render"
     PACKAGE = "package"
     MUSIC = "music"
+
+
+class SceneKind(StrEnum):
+    """What a scene *is made of* — M4-01, from §1.0.3.
+
+    Not every scene is a generated illustration. The reference videos intercut
+    artwork with typographic cards ("Step 5" on cream paper), and the SADD had
+    no concept of that: every scene assumed an ``image`` artifact from an
+    ``ImageProvider``.
+
+    A ``CARD`` renders locally from a template — no provider call, no cost, no
+    style drift, and byte-identical between runs. Three cards in a twenty-scene
+    video is a 15% cut in image spend and three fewer chances for R7 to bite.
+
+    Lowercase values, matching ``ArtifactKind``'s inherited casing (§10.2).
+    """
+
+    ILLUSTRATION = "illustration"
+    CARD = "card"
 
 
 class ArtifactState(StrEnum):
@@ -98,6 +119,36 @@ class VersionStatus(StrEnum):
     AWAITING_APPROVAL = "AWAITING_APPROVAL"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class BrandingStatus(StrEnum):
+    """Lifecycle of a series-scoped branding asset (ADR-016, M3-02).
+
+    **A separate enum that deliberately reuses existing words.** ADR-016 says
+    branding statuses reuse `ArtifactState`'s vocabulary — "same words,
+    separate column" — but the four labels it names do not match either
+    existing enum: `ArtifactState` has no `SUPERSEDED`, and `VersionStatus` has
+    no `PENDING`. Pointing the column at the nearest one would have meant
+    either a status these rows cannot express or three labels they can never
+    hold, and both make an operator reading the column guess.
+
+    **`SUPERSEDED` is stored here, not derived.** That is the opposite of
+    finding B1, and the difference is real: `artifact_version` is append-only,
+    so marking siblings superseded was literally impossible and had to become a
+    view. These tables are mutable by design — ADR-016 accepts reimplementing
+    versioning as the price of series scoping — so an UPDATE is available, and
+    a partial unique index enforces at most one `APPROVED` per series. Nothing
+    here is append-only, so nothing here needs a view.
+
+    There is no `REJECTED`. A rejected candidate group is simply never
+    approved, and the next generation supersedes it; a terminal "no" would add
+    a state with no transition out of it and no screen that shows it.
+    """
+
+    PENDING = "PENDING"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    APPROVED = "APPROVED"
     SUPERSEDED = "SUPERSEDED"
 
 
@@ -160,6 +211,12 @@ class SubjectType(StrEnum):
     PROJECT_PHASE = "project_phase"
     ARTIFACT = "artifact"
     JOB = "job"
+    #: M3-02, added by ``ALTER TYPE`` per §10.4. Branding assets live outside
+    #: the artifact tables (ADR-016) but their approvals are still history, and
+    #: the polymorphic subject is what lets one audit log cover both without a
+    #: foreign key to either.
+    SERIES_CHARACTER = "series_character"
+    SERIES_STYLE = "series_style"
 
 
 class TransitionCause(StrEnum):

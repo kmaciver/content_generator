@@ -16,12 +16,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 import time
+import zlib
 from typing import Any
 
-from videoforge_providers.models import LLMRequest, LLMResult, Usage
+from videoforge_providers.models import (
+    GeneratedImage,
+    ImageCaps,
+    ImageRequest,
+    ImageResult,
+    LLMRequest,
+    LLMResult,
+    Usage,
+    VoiceCaps,
+    VoiceRequest,
+    VoiceResult,
+)
+from videoforge_providers.pricing import estimate_image_cost, estimate_llm_cost
 
-__all__ = ["MockLLMProvider"]
+__all__ = ["MockImageProvider", "MockVoiceProvider", "MockLLMProvider"]
 
 #: Sentences the fake script is assembled from. Deliberately about the *shape*
 #: of an educational short — a hook, some beats, a closing line — because the
@@ -81,19 +95,29 @@ class MockLLMProvider:
         else:
             text = body
 
+        model = req.model_hint or self._model
+        # Rough but non-zero: a spend cap tested against zeros would never
+        # trip, and the cap's own test needs something to add up.
+        input_tokens = sum(len(m.content) for m in req.messages) // 4
+        output_tokens = len(text) // 4
+
         return LLMResult(
             text=text,
             parsed=parsed,
             usage=Usage(
-                # Rough but non-zero: a spend cap tested against zeros would
-                # never trip, and the cap's own test needs something to add up.
-                input_tokens=sum(len(m.content) for m in req.messages) // 4,
-                output_tokens=len(text) // 4,
-                unit_cost_estimate=0.0,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                # Priced through the same table as a real adapter (M3-11), so
+                # the metering path is exercised offline. ``mock-llm`` is
+                # priced at zero, which is a *deliberate* entry rather than a
+                # missing one — see ``pricing.LLM_PRICES``.
+                unit_cost_estimate=estimate_llm_cost(
+                    model, input_tokens, output_tokens
+                ),
             ),
             provider_meta={
                 "provider": self.name,
-                "model": req.model_hint or self._model,
+                "model": model,
                 "seed": seed,
                 "deterministic": True,
             },
@@ -191,3 +215,252 @@ def _offset(name: str) -> int:
     copied narration into the visual brief would look correct.
     """
     return int(hashlib.sha256(name.encode()).hexdigest()[:4], 16)
+
+
+# --------------------------------------------------------------------------- #
+# Images (M3-01)
+# --------------------------------------------------------------------------- #
+
+#: Ratios the mock renders, mirroring what a real adapter would declare.
+#: ``9:16`` first because it is the render target (§D4, 1080×1920).
+_MOCK_RATIOS: tuple[str, ...] = ("9:16", "1:1", "16:9")
+
+#: Short edge of the generated image, in pixels. Small on purpose — these bytes
+#: pass through MinIO and the review UI in every offline run, and a mock that
+#: produced megabytes would make the test suite slow for no added coverage.
+_MOCK_SHORT_EDGE = 64
+
+
+class MockImageProvider:
+    """Deterministic images, offline, and **actually decodable**.
+
+    It would be cheaper to return a fixed byte string, or a 1×1 pixel. Both
+    were rejected: the bytes travel through content-addressed storage, the
+    normalisation step (B2, M3-08) and an ``<img>`` tag in the review UI, and
+    every one of those is a place a not-quite-an-image would fail late and
+    obscurely. Emitting a real PNG at the requested aspect ratio means the
+    offline path exercises the same code the real one will.
+
+    Determinism follows the LLM mock's rule: colour and seed derive from a
+    ``sha256`` of the request, never from ``hash()`` (salted per process) or
+    from the clock.
+    """
+
+    name = "mock"
+
+    def __init__(self, *, model: str = "mock-image-v1") -> None:
+        self._model = model
+
+    def capabilities(self) -> ImageCaps:
+        """Declares full support, so the mock never fails the M3-01 gate.
+
+        Deliberate: the gate exists to reject a *real* provider that cannot do
+        character consistency (ADR-016), and a mock that failed it would make
+        the offline path — the default, and the one CI runs — impossible to
+        configure.
+        """
+        return ImageCaps(
+            max_reference_images=8,
+            supports_seed=True,
+            supports_negative_prompt=True,
+            aspect_ratios=_MOCK_RATIOS,
+            max_images_per_call=8,
+        )
+
+    def generate(self, req: ImageRequest) -> ImageResult:
+        started = time.monotonic()
+        model = req.model_hint or self._model
+        base_seed = req.seed if req.seed is not None else _image_seed(req)
+        width, height = _dimensions(req.aspect_ratio)
+
+        images = tuple(
+            GeneratedImage(
+                data=_solid_png(width, height, _colour(base_seed + index)),
+                mime_type="image/png",
+                width=width,
+                height=height,
+                # Each image of a batch gets its own seed, exactly as a real
+                # provider does — otherwise "generate 4 candidates" would
+                # return four identical pictures and the candidate-selection
+                # UI (M3-04) would have nothing to select between.
+                seed=base_seed + index,
+            )
+            for index in range(max(1, req.n))
+        )
+
+        return ImageResult(
+            images=images,
+            usage=Usage(
+                images=len(images),
+                unit_cost_estimate=estimate_image_cost(model, len(images)),
+            ),
+            provider_meta={
+                "provider": self.name,
+                "model": model,
+                "seed": base_seed,
+                "aspect_ratio": req.aspect_ratio,
+                # Recorded so a test can assert references were *passed*, which
+                # is otherwise invisible: the mock cannot use them, and a
+                # caller that silently dropped them would look identical.
+                "references": len(req.references),
+                "deterministic": True,
+            },
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+
+def _image_seed(req: ImageRequest) -> int:
+    """Stable across processes — same reasoning as ``MockLLMProvider._seed``."""
+    blob = f"{req.prompt}|{req.negative_prompt}|{req.aspect_ratio}"
+    return int(hashlib.sha256(blob.encode()).hexdigest()[:8], 16)
+
+
+def _dimensions(aspect_ratio: str) -> tuple[int, int]:
+    """Pixel size for a ``w:h`` ratio, short edge pinned to ``_MOCK_SHORT_EDGE``.
+
+    An unparseable ratio falls back to 9:16 rather than raising: the mock's job
+    is to keep the offline path running, and a typo in a ratio should surface
+    from the real adapter's validation, not from the fake one.
+    """
+    try:
+        w_part, h_part = aspect_ratio.split(":")
+        w_ratio, h_ratio = int(w_part), int(h_part)
+        if w_ratio <= 0 or h_ratio <= 0:
+            raise ValueError(aspect_ratio)
+    except (ValueError, AttributeError):
+        w_ratio, h_ratio = 9, 16
+
+    if w_ratio <= h_ratio:
+        return _MOCK_SHORT_EDGE, round(_MOCK_SHORT_EDGE * h_ratio / w_ratio)
+    return round(_MOCK_SHORT_EDGE * w_ratio / h_ratio), _MOCK_SHORT_EDGE
+
+
+def _colour(seed: int) -> tuple[int, int, int]:
+    """A mid-tone RGB triple from a seed.
+
+    Clamped away from both extremes so the result is visibly a picture in the
+    review UI — a mock that rendered pure black would be indistinguishable
+    from a broken image element.
+    """
+    return (
+        64 + (seed >> 16) % 160,
+        64 + (seed >> 8) % 160,
+        64 + seed % 160,
+    )
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    """One PNG chunk: length, type, payload, CRC32 of type+payload."""
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
+
+
+def _solid_png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    """A single-colour truecolour PNG, built by hand.
+
+    Hand-rolled rather than via Pillow, which would be a ~3 MB dependency in
+    every worker image for one solid rectangle in a fake provider. The format
+    is four chunks and about fifteen lines; the real image adapter will return
+    provider bytes and never come near this.
+
+    Scanlines each carry a leading filter byte of ``0`` (None), which is what
+    makes the zlib stream trivially correct rather than merely plausible.
+    """
+    raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(
+            b"IHDR",
+            # bit depth 8, colour type 2 (truecolour), no interlace.
+            struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0),
+        )
+        + _png_chunk(b"IDAT", zlib.compress(raw, 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+class MockVoiceProvider:
+    """Deterministic narration with **real, usable character timings** (M3-12).
+
+    It would be cheaper to return silence and a flat array. That was rejected
+    for the same reason ``MockImageProvider`` emits a decodable PNG: these
+    timings travel through word grouping, scene-boundary derivation, an ASS
+    caption file and the timeline compiler, and every one of those is a place
+    a not-quite-plausible number fails late and obscurely.
+
+    The audio is a valid silent MP3 frame sequence of roughly the right length,
+    so anything that probes the file gets a real duration rather than zero.
+
+    Determinism follows the LLM mock's rule — everything derives from the text,
+    never from the clock.
+    """
+
+    name = "mock"
+
+    #: Seconds per character. ~14 chars/second is ordinary narration pace, and
+    #: it makes a 60-second script come out near 60 seconds rather than at some
+    #: length that makes every duration assertion downstream look wrong.
+    SECONDS_PER_CHAR = 1 / 14
+
+    def __init__(self, *, model: str = "mock-voice-v1") -> None:
+        self._model = model
+
+    def capabilities(self) -> VoiceCaps:
+        """Declares timings, so the offline path is configurable.
+
+        The B3/S5 gate exists to reject a *real* provider that cannot place
+        words; a mock that failed it would make the default mode impossible to
+        run, which is the same argument ``MockImageProvider`` makes.
+        """
+        return VoiceCaps(
+            word_timings=True, mime_type="audio/mpeg", max_characters=100_000
+        )
+
+    def synthesise(self, req: VoiceRequest) -> VoiceResult:
+        text = req.text.strip()
+        characters: list[str] = []
+        starts: list[float] = []
+        ends: list[float] = []
+
+        cursor = 0.0
+        for char in text:
+            # Whitespace takes a little longer than a letter, which is what
+            # makes word boundaries in the mock look like word boundaries in a
+            # real response rather than an evenly spaced ramp.
+            width = self.SECONDS_PER_CHAR * (2.2 if char.isspace() else 1.0)
+            characters.append(char)
+            starts.append(round(cursor, 3))
+            cursor += width
+            ends.append(round(cursor, 3))
+
+        return VoiceResult(
+            audio=_silent_mp3(cursor),
+            mime_type="audio/mpeg",
+            characters=tuple(characters),
+            character_starts_s=tuple(starts),
+            character_ends_s=tuple(ends),
+            latency_ms=0,
+            usage=Usage(unit_cost_estimate=0.0),
+            provider_meta={
+                "provider": self.name,
+                "model": self._model,
+                "characters": len(text),
+            },
+        )
+
+
+#: One frame of MPEG-1 Layer III, 48 kbps, 44.1 kHz mono, all-zero payload.
+#: Hand-built rather than pulled from a fixture file so the package ships no
+#: binary blob; 26 ms per frame is the standard frame duration at 44.1 kHz.
+_MP3_FRAME = b"\xff\xfb\x50\xc4" + b"\x00" * 100
+_MP3_FRAME_S = 0.026
+
+
+def _silent_mp3(seconds: float) -> bytes:
+    """Enough frames to make the file's real duration match the timings."""
+    frames = max(1, int(round(seconds / _MP3_FRAME_S)))
+    return b"ID3\x03\x00\x00\x00\x00\x00\x00" + _MP3_FRAME * frames

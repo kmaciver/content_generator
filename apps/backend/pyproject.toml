@@ -11,6 +11,10 @@ dependencies = [
     # the same guards into its capabilities payload so buttons never lie
     # (ADR-015).
     "videoforge-domain",
+    # M3-06: the series branding endpoints compile a style preset's fields into
+    # its prompt block on write, so the stored block is the one that actually
+    # reaches a provider (§10.3 rule 4). Templating only — no provider, no key.
+    "videoforge-prompts",
     # M1-04: the API publishes jobs to the broker. Producer only — it sends by
     # NAME (videoforge_shared.tasks) because importing the worker tasks would
     # break the apps -> packages rule. It therefore cannot execute a task even

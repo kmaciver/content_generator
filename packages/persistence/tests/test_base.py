@@ -59,6 +59,13 @@ class TestNamingConvention:
             # M2-01 — the first structured artifact content.
             "scene_set",
             "scene",
+            # M3-02 — series-scoped branding (ADR-016). Not artifacts: an
+            # artifact cannot be series-scoped, since `artifact.project_id` is
+            # NOT NULL and finding S1's NULLS NOT DISTINCT constraint would
+            # allow exactly one character in the entire table.
+            "series_character",
+            "character_reference",
+            "series_style",
         }
 
 

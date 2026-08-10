@@ -44,8 +44,26 @@ class GenerationJob(Base):
     __tablename__ = "generation_job"
 
     id: Mapped[str] = ulid_pk()
-    project_id: Mapped[str] = mapped_column(
-        ULIDType, sa.ForeignKey("video_project.id", ondelete="CASCADE"), nullable=False
+    #: Nullable since M3-04b, for the same class of reason ``artifact_id``
+    #: already is: **not every job is about a project.** Reference-sheet
+    #: generation belongs to a *series* (ADR-016) and is consumed by every
+    #: episode in it, so forcing it to name one project would be a lie that
+    #: showed up in that project's job list.
+    #:
+    #: The alternative was to run branding generation with no job row at all,
+    #: which loses idempotency (a double-click costs another eight images),
+    #: the audit trail, and — because ``provider_usage.job_id`` is NOT NULL —
+    #: spend metering entirely. Putting the single most expensive operation in
+    #: the system outside the S10 cap is the wrong trade.
+    #:
+    #: ``series_id`` carries the scope instead when this is NULL; exactly one
+    #: of the two is set, enforced by ``ck_generation_job_scope``.
+    project_id: Mapped[str | None] = mapped_column(
+        ULIDType, sa.ForeignKey("video_project.id", ondelete="CASCADE"), nullable=True
+    )
+    #: Set when the job belongs to a series rather than a project.
+    series_id: Mapped[str | None] = mapped_column(
+        ULIDType, sa.ForeignKey("series.id", ondelete="CASCADE"), nullable=True
     )
     #: Nullable because some jobs (a whole-project package build) do not
     #: produce exactly one artifact.
@@ -119,8 +137,17 @@ class GenerationJob(Base):
         ),
         sa.Index("ix_generation_job_project_id_created_at", "project_id", "created_at"),
         sa.Index("ix_generation_job_artifact_id", "artifact_id"),
+        sa.Index("ix_generation_job_series_id", "series_id"),
         sa.CheckConstraint("attempt >= 0", name="attempt_non_negative"),
         sa.CheckConstraint("max_attempts > 0", name="max_attempts_positive"),
+        # **Exactly one scope.** Making `project_id` nullable buys a real case
+        # (series-scoped branding jobs) and would otherwise also buy a nonsense
+        # one: a job attached to neither, or to both. Neither is representable
+        # now, so no reader has to defend against it.
+        sa.CheckConstraint(
+            "(project_id IS NULL) <> (series_id IS NULL)",
+            name="ck_generation_job_scope",
+        ),
     )
 
 

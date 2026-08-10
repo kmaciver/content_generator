@@ -1,0 +1,55 @@
+{#-
+  The image prompt frame (M3-03).
+
+  Block ORDER is the point of this file, not the wording. The character's
+  immutable traits come LAST, after the scene, because both diffusion models
+  and instruction-following models weight the end of a prompt more heavily —
+  so the one thing that must never drift is the last thing read. Reordering
+  these blocks silently weakens character consistency (R7) while every test
+  still passes, which is why the reasoning lives here rather than in a commit
+  message.
+
+  Blocks arrive pre-rendered. Scene text is never interpolated into the
+  character block; see `image_prompt.build_image_prompt`.
+
+  EVERY LINE HERE IS POSITIVE. Nothing in this file names a thing it does not
+  want, because an image model reads the noun and not the instruction — the
+  same rule that keeps `style.avoid` out of the positive block (`style.py`).
+  Measured on 2026-08-08: a frame block ending "No split screen, no panels, no
+  dividing lines ... no inset or corner vignette" produced an image with a
+  drawn border inset from the edges. Told not to divide the frame, the model
+  drew a single panel instead.
+
+  Prohibitions belong in the negative prompt, which `build_image_prompt`
+  assembles separately from `style.avoid`, `character.never` and the caller's
+  `scene_negative`. Adding a "no ..." line here would undo that.
+-#}
+{% if style_block %}{{ style_block }}
+
+{% endif -%}
+Scene: {{ scene }}
+{%- if character_block %}
+
+The recurring character appears in this scene. These traits are fixed for the
+whole series and take precedence over anything above:
+{{ character_block }}
+{%- if variable_block %}
+
+Free to vary with the scene: {{ variable_block }}
+{%- endif %}
+{%- endif %}
+{%- if cast_block %}
+
+Everyone else in the frame is built to the same rules, and this also takes
+precedence over the scene: {{ cast_block }}
+{%- endif %}
+
+One continuous frame: one moment, one place, one camera. The scene runs to all
+four edges of the image and bleeds off them. Every book, sign, screen, receipt,
+label and packet in frame is blank.
+{%- if correction_block %}
+
+A previous attempt at this exact frame was rejected. Fix this, and change
+nothing else:
+{{ correction_block }}
+{%- endif %}

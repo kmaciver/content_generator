@@ -100,7 +100,16 @@ taking out the broker along with the cache.
 | `replay` | Recorded fixtures only. |
 
 Per-capability: `PROVIDERS__LLM__{ADAPTER,MODEL,TIMEOUT_S}`,
-`PROVIDERS__IMAGE__{ADAPTER,MODEL}`, `PROVIDERS__VOICE__{ADAPTER,VOICE_ID}`.
+`PROVIDERS__IMAGE__{ADAPTER,MODEL,MIN_REFERENCE_IMAGES}`,
+`PROVIDERS__VOICE__{ADAPTER,VOICE_ID}`.
+
+> `PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES` (default `1`) is M3-01's capability
+> gate, and it fails at **configuration time** (ADR-016). An image provider that
+> cannot accept reference images cannot hold a character across scenes, and the
+> alternative to failing at boot is twenty plausible images of twenty different
+> characters — money spent, and diagnosable only by looking at them. Set it to
+> `0` if you are generating abstract or diagram-only videos with no recurring
+> character; the check then logs a warning and stands down.
 
 > Word-level timestamps are a **hard requirement** for voice adapters, not a
 > preference (**B3**/**S5**): scene boundaries and captions both depend on them.
@@ -109,7 +118,13 @@ Per-capability: `PROVIDERS__LLM__{ADAPTER,MODEL,TIMEOUT_S}`,
 
 ## Provider API keys — worker containers only
 
-`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ELEVENLABS_API_KEY`, `STABILITY_API_KEY`
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ELEVENLABS_API_KEY`, `STABILITY_API_KEY`,
+`GOOGLE_API_KEY`
+
+> `GOOGLE_API_KEY` is Gemini's, and is spelled the way **Google's own SDK**
+> spells it rather than `GEMINI_API_KEY`. An operator who already exports it for
+> another tool should not have to keep a second copy under a name only this
+> project knows.
 
 Compose passes this block **exclusively to worker services**. The API, frontend,
 and nginx must never receive them (NF8, SADD §21.3) — a compromised web tier then
@@ -122,7 +137,7 @@ Leave blank while `PROVIDERS__MODE=mock`.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `DAILY_COST_LIMIT` | `10.00` | Job creation is refused once the day's *estimated* spend exceeds this. At ~20 images per video this is a real guard against a regeneration loop, not a theoretical one. **Not yet enforced** — the `daily_spend` counter lands with M3-11 (S10). |
+| `DAILY_COST_LIMIT` | `10.00` | A stage refuses to call a provider once the day's *estimated* spend has reached this. At ~20 images per video it is a real guard against a regeneration loop, not a theoretical one. **Enforced since M3-11.** Checked *before* each call — a cap that checked afterwards would produce a very well-documented bill. The window is the **UTC** day, computed database-side so five containers agree on when it started; an operator in UTC-8 sees it reset mid-afternoon. `0` (or blank) means **no cap**, not "spend nothing". |
 | `COST_CURRENCY` | `USD` | ISO 4217 code the limit and all estimates are expressed in. **A label, not a conversion**: estimates come from price tables inside each adapter, and vendors publish those in USD. If your credits were bought in another currency, that is an FX matter between you and the vendor — it does not change what a call costs in list terms. Change this only alongside the price tables. |
 
 ## Rendering (**D4**: FFmpeg, not Remotion)
@@ -167,6 +182,7 @@ PROVIDERS__LLM__MODEL=
 PROVIDERS__LLM__TIMEOUT_S=120
 PROVIDERS__IMAGE__ADAPTER=mock
 PROVIDERS__IMAGE__MODEL=
+PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES=1
 PROVIDERS__VOICE__ADAPTER=mock
 PROVIDERS__VOICE__VOICE_ID=
 

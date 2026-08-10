@@ -59,6 +59,24 @@ class VideoProject(Base):
         TimestampType, nullable=False, server_default=sa.func.now()
     )
     active_pointers: Mapped[dict[str, Any]] = jsonb_col()
+    # M3-06, and the load-bearing half of ADR-016: which branding versions this
+    # project was generated against. Set once, on the first image generation,
+    # and never moved.
+    #
+    # Without them, approving character v2 would retroactively invalidate every
+    # episode built from v1 — a staleness cascade across the whole back
+    # catalogue, triggered by an ordinary tweak. With them, superseding at the
+    # series level affects *new* projects only.
+    #
+    # **Deliberately not foreign keys.** These are a provenance record and must
+    # outlive their subjects: deleting a series cascades its branding rows away
+    # while ``series_id`` here goes SET NULL, and a FK would then either block
+    # the delete or (with SET NULL) erase the record of what the video was
+    # actually made from. Same reasoning as ``state_transition.subject_id`` and
+    # ``character_reference.generation_job_id`` — history does not hold
+    # references, it holds ids.
+    character_version_id: Mapped[str | None] = mapped_column(ULIDType, nullable=True)
+    style_version_id: Mapped[str | None] = mapped_column(ULIDType, nullable=True)
     settings: Mapped[dict[str, Any]] = jsonb_col()
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = updated_at_col()

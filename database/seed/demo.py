@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import Engine
 
 from videoforge_persistence.models import AppUser, Workspace
 from videoforge_persistence.uow import UnitOfWork, unit_of_work
+from videoforge_prompts.style import compile_style_block
 from videoforge_shared.enums import (
     ArtifactKind,
     ArtifactState,
@@ -49,6 +51,8 @@ DEMO_USER_ID = "01DEMOUSER0000000000000000"[:26]
 DEMO_SERIES_ID = "01DEMOSERIES00000000000000"[:26]
 DEMO_PROJECT_ID = "01DEMOPROJECT0000000000000"[:26]
 DEMO_EMPTY_PROJECT_ID = "01DEMOPROJECTEMPTY00000000"[:26]
+DEMO_CHARACTER_ID = "01DEMOCHARACTER0000000000"[:26]
+DEMO_STYLE_ID = "01DEMOSTYLE000000000000000"[:26]
 
 _RESEARCH_SUMMARY = (
     "Photosynthesis splits water using light energy, releasing oxygen as a "
@@ -150,8 +154,102 @@ def _build(uow: UnitOfWork) -> None:
     series.id = DEMO_SERIES_ID
     uow.flush()
 
+    _branding(uow)
     _seeded_project(uow)
     _empty_project(uow)
+
+
+def _branding(uow: UnitOfWork) -> None:
+    """An approved character and style for the demo series (M3-02, M3-05).
+
+    Seeded so that a fresh ``make up`` can reach image generation without
+    anyone hand-writing SQL — the admission check (M3-06) 409s a project whose
+    series has no approved branding, and until the editor UI lands (M3-13)
+    there is nowhere else to create one.
+
+    The traits are deliberately **reductive**. Risk R7's finding is that
+    consistency comes from a convention a diffusion model cannot get wrong: a
+    pale circle with two dots is near-impossible to draw inconsistently, while
+    a detailed face is near-impossible to draw consistently. A demo character
+    with hair and clothing would model the wrong instinct for anyone copying
+    it as a starting point.
+
+    **Every element names its own colour, and that is not redundant with the
+    style palette.** Measured against Gemini on 2026-08-07: with colours only in
+    the palette, four scenes came back with the body terracotta, then black,
+    then terracotta, then cream, and the limbs shuffling independently. The
+    palette was obeyed perfectly — only the three colours ever appeared — but
+    nothing said *which element gets which*, so the model reassigned them every
+    scene. The palette declares what may be used; the traits declare where. A
+    character whose colour scheme changes per scene is not a recurring
+    character.
+
+    The ``no ring or band`` clause is likewise from measurement, not
+    imagination: the close-up grew a thick black ring around the head that read
+    as hair or a hood. Close framing invites detail, and the traits have to
+    refuse it by name.
+
+    No reference sheets: those need real generated images (M3-04b). A character
+    approved without them still works — image generation falls back to text
+    alone — which is honest about what is built rather than seeding fake keys
+    that point at nothing in object storage. The drift above is also the
+    argument that reference sheets are **necessary rather than optional**.
+    """
+    character = uow.branding.add_character_version(
+        DEMO_SERIES_ID,
+        name="Pip",
+        immutable_traits={
+            "head": (
+                "a smooth cream #F4EDE4 circle, no hair, no ears, "
+                "no ring or band around it"
+            ),
+            "eyes": "two small black #141414 dots, no whites, no eyebrows",
+            "body": "one rounded terracotta #D96A4E shape, always terracotta",
+            "limbs": "thin black #141414 sticks",
+            "scale": "the head is one third of total height",
+        },
+        variable_traits={
+            "pose": "varies with the scene",
+            "expression": "conveyed by posture, never by facial detail",
+        },
+    )
+    character.id = DEMO_CHARACTER_ID
+    uow.flush()
+    uow.branding.approve_character(DEMO_CHARACTER_ID)
+
+    fields: dict[str, Any] = {
+        "medium": "flat vector illustration",
+        "palette": ["#141414", "#F4EDE4", "#D96A4E", "#4E7AD9"],
+        "line": "no outlines",
+        "shading": "flat fills, no gradients",
+        # Names the colour, not just "a single flat colour". The looser wording
+        # was obeyed *literally and correctly* — and produced two cream
+        # backgrounds followed by two black ones, which across hard cuts every
+        # ~2.5s (§1.0.1) is a strobe rather than a style.
+        "background": (
+            "flat cream #F4EDE4, the same colour in every scene, no scenery"
+        ),
+        # The lower fifth is where burnt-in captions land (M4, from the voice
+        # track's word timestamps). Reserving it in the *style* rather than
+        # per scene is what keeps every episode's captions readable.
+        "composition": (
+            "the subject fills the middle of the frame; keep the lower fifth "
+            "visually quiet"
+        ),
+        "detail": "radically reductive; shapes only",
+        "avoid": ["photorealism", "3d render", "text", "gradients", "drop shadows"],
+    }
+    style = uow.branding.add_style_version(
+        DEMO_SERIES_ID,
+        name="Reductive Flat",
+        fields=fields,
+        # Compiled at seed time by the same function the API uses, so the
+        # seeded row is byte-identical to one created through `POST /styles`.
+        prompt_block=compile_style_block(fields).block,
+    )
+    style.id = DEMO_STYLE_ID
+    uow.flush()
+    uow.branding.approve_style(DEMO_STYLE_ID)
 
 
 def _empty_project(uow: UnitOfWork) -> None:

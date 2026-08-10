@@ -17,6 +17,7 @@ from videoforge_prompts import (
     UnknownTemplateError,
     available,
     render,
+    render_block,
     template_ref,
 )
 
@@ -103,14 +104,37 @@ class TestDiscovery:
     def test_templates_are_found_on_disk(self) -> None:
         assert "script" in available()
 
-    def test_every_template_has_both_sections(self) -> None:
+    def test_every_chat_template_has_both_sections(self) -> None:
         """A template with no separator renders entirely as a system prompt and
         sends an empty user turn — which most providers reject, but only at
-        call time, in a worker, on someone's first generation."""
+        call time, in a worker, on someone's first generation.
+
+        Scoped to chat templates since M3-03: an image prompt is one string,
+        because that is what a diffusion provider takes.
+        """
         for name in available():
+            if name in prompts.BLOCK_TEMPLATES:
+                continue
             rendered = render(name, **_context_for(name))
             assert rendered.system.strip(), name
             assert rendered.user.strip(), name
+
+    def test_every_block_template_renders_to_one_section(self) -> None:
+        """The other half of the invariant.
+
+        Declared in ``BLOCK_TEMPLATES`` rather than sniffed from the source, so
+        a chat template that *accidentally* lost its separator fails the test
+        above instead of silently reclassifying itself as a block.
+        """
+        for name in sorted(prompts.BLOCK_TEMPLATES):
+            rendered = render_block(name, **_context_for(name))
+            assert rendered.text.strip(), name
+
+    def test_block_templates_all_exist(self) -> None:
+        """A name in ``BLOCK_TEMPLATES`` with no file behind it means a
+        template was renamed or deleted and the declaration was not, so the
+        block half of the invariant silently covers nothing."""
+        assert set(available()) >= prompts.BLOCK_TEMPLATES
 
     def test_the_shipped_directory_is_inside_the_package(self) -> None:
         """It has to be packaged, not merely present in the checkout: the
@@ -125,7 +149,9 @@ def _context_for(name: str) -> dict[str, object]:
     """Every variable each template needs. Deliberately explicit — a template
     that grows a variable should fail here until someone decides what the
     callers pass."""
-    return {
+    # Annotated rather than inferred: without it mypy joins the entries'
+    # differing value types down to `object` and the lookup stops type-checking.
+    contexts: dict[str, dict[str, object]] = {
         "script": {"topic": "tides", "target_seconds": 50, "research": None},
         "research": {"topic": "tides", "target_seconds": 50},
         "scenes": {
@@ -139,5 +165,101 @@ def _context_for(name: str) -> dict[str, object]:
             "total": 3,
             "visual_brief": "a beach at night",
             "narration": "The moon pulls.",
+            "aspect": "9:16",
+            "orientation": "vertical",
         },
-    }[name]
+        "image": {
+            "style_block": "Medium: flat vector",
+            "scene": "a beach at night",
+            "character_block": "Pip —\n- head: a pale dome",
+            "variable_block": "pose standing",
+            "cast_block": "everyone has an oversized round head",
+            "correction_block": "",
+        },
+    }
+    return contexts[name]
+
+
+class TestFrameConstraints:
+    """Both templates that shape a scene image must refuse panels and text.
+
+    Measured on the first live image run (2026-08-08). Two of five scenes came
+    back as split panels and one carried mirror-written text — and in each case
+    the *positive* prompt had asked for it, because ``prompts.generate`` had
+    written "Split-screen composition divided by a vertical line down the
+    center" and "an open notebook with 'budget' written on the cover page".
+
+    The image template already said "No text ... anywhere in the image" and lost
+    to the scene text that asked for some. So the refusal has to hold at both
+    ends: the stage that *writes* briefs must not ask, and the stage that
+    *renders* them must not comply.
+    """
+
+    def test_the_prompt_stage_is_told_not_to_ask(self) -> None:
+        rendered = render(
+            "prompt",
+            index=1,
+            total=3,
+            visual_brief="contrast chores done with chores skipped",
+            narration="Some kids do the dishes.",
+            aspect="9:16",
+            orientation="vertical",
+        )
+        # The *system* half may say "never", because it is read by an LLM that
+        # understands instructions. What it must forbid is negations in the
+        # model's own **output**, which becomes an image prompt verbatim.
+        instructions = " ".join(rendered.system.lower().split())
+        assert "write only what is present" in instructions
+        assert "one continuous frame" in instructions
+        assert "never by the words on them" in instructions
+        # The frame's shape reaches the stage that composes for it — without
+        # it, briefs describe square compositions the model then boxes.
+        assert "the frame is 9:16 vertical" in instructions
+
+    def test_the_image_frame_states_only_what_must_be_present(self) -> None:
+        """**The positive block may not name a thing it does not want.**
+
+        An image model reads the noun, not the instruction — the same rule that
+        keeps ``style.avoid`` out of the positive block. Measured on
+        2026-08-08: a frame block ending "No split screen, no panels, no
+        dividing lines ... no inset or corner vignette" produced an image with
+        a drawn border inset from the edges. Told not to divide the frame, the
+        model drew a single panel instead.
+
+        This is the third time the rule has been rediscovered (``avoid`` in the
+        style block, the character's nose, now the border), so it is asserted
+        rather than remembered.
+        """
+        # ``render_block``, not ``render``: the image frame is a block template
+        # with no system/user split — it is composed into a provider request
+        # rather than sent as a chat exchange.
+        #
+        # Every block empty, so what remains is the template's **own** wording
+        # and nothing else. Caller-supplied blocks may legitimately say "no
+        # hair" — that is a character trait, and it travels in the block whose
+        # precedence is the whole point of this template.
+        #
+        # Whitespace-normalised: the template is wrapped prose, and a test that
+        # broke when someone re-flowed a paragraph would be testing the line
+        # width rather than the wording.
+        frame = " ".join(
+            render_block(
+                "image",
+                style_block="",
+                scene="",
+                character_block="",
+                variable_block="",
+                cast_block="",
+                correction_block="",
+            ).text.split()
+        )
+
+        assert "One continuous frame" in frame
+        assert "all four edges" in frame
+        assert "blank" in frame
+
+        for banned in (" no ", "never", "without", "avoid", "not "):
+            assert banned not in frame.lower(), (
+                f"the frame's own wording names {banned!r}; prohibitions "
+                "belong in the negative prompt, not the positive block"
+            )

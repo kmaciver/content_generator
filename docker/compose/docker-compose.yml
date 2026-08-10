@@ -78,11 +78,17 @@ x-provider-secrets: &provider-secrets
   PROVIDERS__LLM__MODEL: "${PROVIDERS__LLM__MODEL:-}"
   PROVIDERS__LLM__TIMEOUT_S: "${PROVIDERS__LLM__TIMEOUT_S:-120}"
   PROVIDERS__IMAGE__MODEL: "${PROVIDERS__IMAGE__MODEL:-}"
+  # M3-01's capability gate (ADR-016). Forwarded rather than left to the code
+  # default for the reason PROVIDERS__LLM__MODEL was: a knob documented as
+  # settable that compose does not pass through is a knob that silently does
+  # nothing.
+  PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES: "${PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES:-1}"
   PROVIDERS__VOICE__VOICE_ID: "${PROVIDERS__VOICE__VOICE_ID:-}"
   OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
   ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY:-}"
   STABILITY_API_KEY: "${STABILITY_API_KEY:-}"
+  GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
 
 # The tracked provider-selection file (no secrets in it — see the file header).
 # Mounted only where provider settings are read.

@@ -33,6 +33,7 @@ from videoforge_providers.models import (
     ProviderTimeoutError,
     Usage,
 )
+from videoforge_providers.pricing import estimate_llm_cost
 
 logger = logging.getLogger(__name__)
 
@@ -122,19 +123,27 @@ class AnthropicLLMProvider:
         message = self._call(kwargs)
         text, parsed = _extract(message, structured=req.response_schema is not None)
 
+        input_tokens = getattr(message.usage, "input_tokens", None)
+        output_tokens = getattr(message.usage, "output_tokens", None)
+        # The model the API *actually* served, not the one requested — aliases
+        # resolve server-side, and §10.3 rule 4's reproducibility chain needs
+        # the resolved value. Pricing uses the same one, so a request that
+        # silently resolved to a costlier model is metered as what ran.
+        served_model = getattr(message, "model", kwargs["model"])
+
         return LLMResult(
             text=text,
             parsed=parsed,
             usage=Usage(
-                input_tokens=getattr(message.usage, "input_tokens", None),
-                output_tokens=getattr(message.usage, "output_tokens", None),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                unit_cost_estimate=estimate_llm_cost(
+                    served_model, input_tokens, output_tokens
+                ),
             ),
             provider_meta={
                 "provider": self.name,
-                # The model the API *actually* served, not the one requested —
-                # aliases resolve server-side, and §10.3 rule 4's
-                # reproducibility chain needs the resolved value.
-                "model": getattr(message, "model", kwargs["model"]),
+                "model": served_model,
                 "stop_reason": getattr(message, "stop_reason", None),
                 "message_id": getattr(message, "id", None),
                 "structured": req.response_schema is not None,

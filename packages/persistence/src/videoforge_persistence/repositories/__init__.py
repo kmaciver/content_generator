@@ -24,6 +24,7 @@ from videoforge_persistence.repositories.audit import (
     OutboxRepository,
 )
 from videoforge_persistence.repositories.base import Repository
+from videoforge_persistence.repositories.branding import BrandingRepository
 from videoforge_persistence.repositories.jobs import (
     JobRepository,
     ProviderUsageRepository,
@@ -38,17 +39,20 @@ from videoforge_persistence.repositories.reviews import (
     CommentRepository,
     ReviewRepository,
 )
+from videoforge_persistence.repositories.scenes import SceneRepository
 
 __all__ = [
     "ArtifactRepository",
     "ArtifactVersionRepository",
     "AuditRepository",
+    "BrandingRepository",
     "CommentRepository",
     "JobRepository",
     "OutboxRepository",
     "ProjectRepository",
     "ProviderUsageRepository",
     "Repository",
+    "SceneRepository",
     "ReservedJob",
     "ReviewRepository",
     "SeriesRepository",

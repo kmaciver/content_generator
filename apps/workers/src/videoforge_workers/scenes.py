@@ -23,7 +23,7 @@ from typing import Any
 from videoforge_domain.duration import duration_tolerance_ms, target_duration_ms
 from videoforge_persistence.models import ArtifactVersion, Scene, SceneSet
 from videoforge_prompts import render
-from videoforge_shared.enums import ArtifactKind
+from videoforge_shared.enums import ArtifactKind, SceneKind
 from videoforge_shared.ids import new_ulid
 from videoforge_shared.tasks import SCENES_GENERATE
 from videoforge_workers.skeleton import JobContext, videoforge_task
@@ -51,6 +51,11 @@ _RESPONSE_SCHEMA = {
                     "narration_text": {"type": "string"},
                     "visual_brief": {"type": "string"},
                     "target_duration_ms": {"type": "integer"},
+                    # M4-01. Optional in the schema, defaulted in `_normalise`:
+                    # a model that omits it produces illustrations, which is
+                    # the pre-M4 behaviour and the safe direction to fail.
+                    "kind": {"type": "string", "enum": ["illustration", "card"]},
+                    "card_text": {"type": "string"},
                 },
                 "required": [
                     "narration_text",
@@ -81,7 +86,7 @@ def scenes_body(ctx: JobContext) -> None:
         target_ms=target_ms,
         tolerance_ms=duration_tolerance_ms(target_ms),
     )
-    result = llm_complete(prompt, _RESPONSE_SCHEMA)
+    result = llm_complete(ctx, prompt, _RESPONSE_SCHEMA)
 
     scenes = _normalise(result.parsed or {})
     if not scenes:
@@ -117,6 +122,8 @@ def scenes_body(ctx: JobContext) -> None:
                     narration_text=scene["narration_text"],
                     visual_brief=scene["visual_brief"],
                     target_duration_ms=scene["target_duration_ms"],
+                    kind=SceneKind(scene["kind"]),
+                    card_text=scene["card_text"],
                 )
             )
         inner.uow.flush()
@@ -157,14 +164,52 @@ def _normalise(parsed: dict[str, Any]) -> list[dict[str, Any]]:
             # constraint the operator has never heard of.
             logger.warning("dropping malformed scene", extra={"scene": raw})
             continue
+        kind, card_text = _kind_of(raw)
         scenes.append(
             {
                 "narration_text": narration,
                 "visual_brief": brief,
                 "target_duration_ms": duration,
+                "kind": kind.value,
+                "card_text": card_text,
             }
         )
     return scenes
+
+
+def _kind_of(raw: dict[str, Any]) -> tuple[SceneKind, str | None]:
+    """Decide illustration-or-card, and refuse to write a contradiction.
+
+    **Demoted rather than dropped** (M4-01). The two CHECK constraints on
+    ``scene`` reject a card with no text and an illustration carrying card
+    text, so a model that claims ``card`` without usable text would fail the
+    whole job — throwing away nineteen good scenes over one bad field. A card
+    that cannot be rendered is exactly an illustration, which is the pre-M4
+    behaviour and costs one image rather than the run.
+
+    ``card_text`` is truncated, not rejected, for the same reason: the column
+    caps at 60 characters because that is what stays legible at card size, and
+    a model that wrote 64 got the scene right and the brevity wrong.
+    """
+    declared = str(raw.get("kind") or SceneKind.ILLUSTRATION.value).strip().lower()
+    text = str(raw.get("card_text") or "").strip()
+
+    if declared != SceneKind.CARD.value:
+        if text:
+            # Not silent: the model said "illustration" and then wrote words to
+            # put on a card. One of the two was a mistake and we cannot tell
+            # which, so the field that survives is the one it was asked for.
+            logger.warning(
+                "discarding card_text on an illustration scene",
+                extra={"card_text": text},
+            )
+        return SceneKind.ILLUSTRATION, None
+
+    if not text:
+        logger.warning("card scene arrived with no text; treating as illustration")
+        return SceneKind.ILLUSTRATION, None
+
+    return SceneKind.CARD, text[:60]
 
 
 def _check_total(

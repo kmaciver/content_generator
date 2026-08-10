@@ -33,16 +33,28 @@ from typing import Any
 from jinja2 import Environment, StrictUndefined
 
 __all__ = [
+    "BLOCK_TEMPLATES",
     "TEMPLATES_DIR",
     "PromptTemplate",
+    "RenderedBlock",
     "RenderedPrompt",
     "UnknownTemplateError",
     "available",
     "render",
+    "render_block",
     "template_ref",
 ]
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+#: Templates rendered by :func:`render_block` rather than :func:`render`.
+#:
+#: Chat prompts have a system/user split; an image prompt is one string,
+#: because that is what a diffusion provider takes. Declaring which is which
+#: here rather than sniffing for the separator means a template that is
+#: *accidentally* missing its split is a failure rather than a reclassification
+#: — the whole point of the invariant.
+BLOCK_TEMPLATES: frozenset[str] = frozenset({"image"})
 
 #: Separates the two halves of a template file. Everything before it is the
 #: system prompt, everything after is the user turn — one file per prompt
@@ -67,6 +79,19 @@ class RenderedPrompt:
     system: str
     user: str
     #: Goes straight into ``artifact_version.prompt_template_ref``.
+    ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedBlock:
+    """A single-section template, rendered (M3-03).
+
+    Image prompts have no system/user split — a diffusion provider takes one
+    string. They still need provenance, so they are templates like everything
+    else and carry the same content-pinned ``ref``.
+    """
+
+    text: str
     ref: str
 
 
@@ -153,6 +178,25 @@ def render(name: str, /, **context: Any) -> RenderedPrompt:
             f"template {name!r} has no user section; expected a {_SPLIT!r} separator"
         )
     return RenderedPrompt(system=system.strip(), user=user.strip(), ref=template.ref)
+
+
+def render_block(name: str, /, **context: Any) -> RenderedBlock:
+    """Render a template that has no system/user split.
+
+    Deliberately a separate function rather than making the split optional in
+    :func:`render`. The split is a *contract* for chat prompts — a template
+    that lost its user section is a bug, and a lenient ``render`` would return
+    an empty user turn and let the model answer a system prompt on its own.
+    Two functions keep both contracts strict.
+    """
+    template = _get(name)
+    text = _environment().from_string(template.source).render(**context)
+    if _SPLIT in text:
+        raise ValueError(
+            f"template {name!r} contains a {_SPLIT!r} separator; it is a chat "
+            "prompt and should be rendered with render(), not render_block()"
+        )
+    return RenderedBlock(text=text.strip(), ref=template.ref)
 
 
 def _get(name: str) -> PromptTemplate:

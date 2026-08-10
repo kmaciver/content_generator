@@ -3,8 +3,16 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api, type ArtifactSummary } from "@/lib/api";
+import {
+  api,
+  REJECTION_LABELS,
+  REJECTION_REASONS,
+  type ArtifactSummary,
+  type RejectionReason,
+} from "@/lib/api";
 import { artifactStateColor, humanise } from "@/lib/state-colors";
+import { ContactSheet } from "./contact-sheet";
+import { SceneSelector } from "./scene-selector";
 import { StageContent } from "./stage-content";
 import { StageRail } from "./stage-rail";
 import { VersionSwitcher } from "./version-switcher";
@@ -29,9 +37,15 @@ const POLL_MS = 1500;
 export function PipelineReview({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient();
   const [selectedKind, setSelectedKind] = useState<string | null>(null);
+  // `null` means the stage's set-level artifact; a scene id narrows the
+  // review panel to that scene's own artifact.
+  const [selectedScene, setSelectedScene] = useState<string | null>(null);
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const [comment, setComment] = useState("");
+  // Cleared on every decision: reasons describe *this* version, and carrying
+  // them to the next one would attribute a complaint nobody made.
+  const [reasons, setReasons] = useState<RejectionReason[]>([]);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -51,7 +65,7 @@ export function PipelineReview({ projectId }: { projectId: string }) {
     [...stages].reverse().find((s) => s.artifact_id)?.kind ?? null;
   const activeKind = selectedKind ?? defaultKind;
   const artifactSummary = project.data?.artifacts.find(
-    (a) => a.kind === activeKind && a.scene_ref === null,
+    (a) => a.kind === activeKind && a.scene_ref === selectedScene,
   );
 
   const artifact = useQuery({
@@ -100,12 +114,18 @@ export function PipelineReview({ projectId }: { projectId: string }) {
   });
 
   const decide = useMutation({
-    mutationFn: ({ approve }: { approve: boolean }) => {
-      const action = approve ? api.approve : api.reject;
-      return action(current!.id, current!.version_no, comment || undefined);
-    },
+    mutationFn: ({ approve }: { approve: boolean }) =>
+      approve
+        ? api.approve(current!.id, current!.version_no, comment || undefined)
+        : api.reject(
+            current!.id,
+            current!.version_no,
+            comment || undefined,
+            reasons,
+          ),
     onSuccess: () => {
       setComment("");
+      setReasons([]);
       invalidate();
     },
   });
@@ -159,12 +179,44 @@ export function PipelineReview({ projectId }: { projectId: string }) {
         selected={activeKind ?? ""}
         onSelect={(kind) => {
           setSelectedKind(kind);
+          // Scene selection does not survive a stage change: scene 4 of the
+          // prompts is not scene 4 of anything else, and silently carrying it
+          // across would show the reviewer a different artifact than the one
+          // they think they picked.
+          setSelectedScene(null);
           setSelectedVersion(null);
           setDraft(null);
         }}
         onGenerate={(kind, regenerate) => generate.mutate({ kind, regenerate })}
         busy={busy}
       />
+
+      <SceneSelector
+        scenes={project.data.scenes}
+        artifacts={project.data.artifacts}
+        kind={activeKind ?? ""}
+        selected={selectedScene}
+        onSelect={(sceneRef) => {
+          setSelectedScene(sceneRef);
+          setSelectedVersion(null);
+          setDraft(null);
+        }}
+      />
+
+      {/* Only for kinds whose review unit is a picture. A contact sheet of
+          twenty prompts is twenty paragraphs in a grid — harder to read than
+          the list, not easier — so this is not "any per-scene kind". */}
+      {activeKind === "image" && selectedScene === null ? (
+        <ContactSheet
+          projectId={projectId}
+          kind={activeKind}
+          onOpenScene={(sceneId) => {
+            setSelectedScene(sceneId);
+            setSelectedVersion(null);
+            setDraft(null);
+          }}
+        />
+      ) : null}
 
       {artifactSummary ? (
         <section className="flex flex-col gap-5">
@@ -192,6 +244,13 @@ export function PipelineReview({ projectId }: { projectId: string }) {
                 <StageContent
                   kind={activeKind ?? ""}
                   content={detail.data.content}
+                  meta={detail.data.meta}
+                  // Server-built (M4-11). This used to compose
+                  // `/assets/assets/{key}` here, which was right for images
+                  // and voice and wrong for a render — those live in the
+                  // artifacts bucket, so the guess would have 403'd on the
+                  // first video the pipeline ever produced.
+                  assetUrl={detail.data.asset_url ?? null}
                 />
               ) : (
                 <textarea
@@ -230,6 +289,53 @@ export function PipelineReview({ projectId }: { projectId: string }) {
                   color: "var(--color-ink)",
                 }}
               />
+              {/* Why, from a fixed vocabulary (M3-10). These become the
+                  correction block the next attempt carries, so a rejection
+                  with none tells the model nothing it did not already know.
+                  Shown only when rejecting is legal — offering them next to a
+                  disabled Reject would be a control that does nothing. */}
+              {caps?.can_reject ? (
+                <fieldset className="flex flex-wrap items-center gap-2">
+                  <legend className="sr-only">Rejection reasons</legend>
+                  <span
+                    className="text-xs"
+                    style={{ color: "var(--color-ink-muted)" }}
+                  >
+                    What is wrong?
+                  </span>
+                  {REJECTION_REASONS.map((reason) => {
+                    const on = reasons.includes(reason);
+                    return (
+                      <button
+                        key={reason}
+                        type="button"
+                        aria-pressed={on}
+                        data-testid={`reason-${reason}`}
+                        onClick={() =>
+                          setReasons((current) =>
+                            current.includes(reason)
+                              ? current.filter((r) => r !== reason)
+                              : [...current, reason],
+                          )
+                        }
+                        className="rounded-full px-3 py-1 text-xs"
+                        style={{
+                          border: `1px solid ${
+                            on
+                              ? "var(--color-state-failed)"
+                              : "var(--color-border-subtle)"
+                          }`,
+                          color: on
+                            ? "var(--color-state-failed)"
+                            : "var(--color-ink-muted)",
+                        }}
+                      >
+                        {REJECTION_LABELS[reason]}
+                      </button>
+                    );
+                  })}
+                </fieldset>
+              ) : null}
               <div className="flex flex-wrap gap-2">
                 {/* Every button below is gated by the server's capabilities
                     payload, computed from the domain FSM (§11). Nothing here

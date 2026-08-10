@@ -158,3 +158,37 @@ class ProjectRepository(Repository):
                 )
             )
         )
+
+    def pin_branding(
+        self,
+        project_id: str,
+        *,
+        character_version_id: str,
+        style_version_id: str,
+    ) -> bool:
+        """Record which branding versions this project generates against (M3-06).
+
+        **Write-once.** The guard is in the WHERE clause — ``character_version_id
+        IS NULL`` — so a second call changes zero rows and returns False rather
+        than moving a pin. That matters because the pin is what protects the
+        back catalogue (ADR-016): a project whose pin could move would start
+        producing images against a character its earlier scenes never saw, and
+        the mismatch would be invisible until someone watched the video.
+
+        Guarded in SQL rather than by reading first, for the reason
+        ``JobRepository.claim`` gives: two concurrent image jobs on a fresh
+        project both find NULL, and only the statement itself can decide which
+        one wins.
+        """
+        result = self.session.execute(
+            sa.update(VideoProject)
+            .where(
+                VideoProject.id == project_id,
+                VideoProject.character_version_id.is_(None),
+            )
+            .values(
+                character_version_id=character_version_id,
+                style_version_id=style_version_id,
+            )
+        )
+        return affected_rows(result) == 1

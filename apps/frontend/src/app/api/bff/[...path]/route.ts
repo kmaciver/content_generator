@@ -29,6 +29,12 @@ const ALLOWED_PREFIXES = [
   "artifacts",
   "artifact-versions",
   "jobs",
+  // Series branding (M3-13). A separate surface from projects for ADR-016's
+  // reason: character and style are preconditions a project consumes, not
+  // stages it produces.
+  "series",
+  "characters",
+  "styles",
 ] as const;
 
 function isAllowed(segments: string[]): boolean {

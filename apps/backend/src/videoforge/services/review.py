@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from videoforge_domain.artifact_lifecycle import (
     ArtifactEvent,
+    IllegalTransitionError,
     Transition,
     apply_event,
 )
@@ -34,7 +36,12 @@ from videoforge_shared.hashing import sha256_bytes
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ReviewService", "StaleVersionError"]
+__all__ = [
+    "BatchOutcome",
+    "ReviewService",
+    "SkippedApproval",
+    "StaleVersionError",
+]
 
 
 class StaleVersionError(RuntimeError):
@@ -58,6 +65,23 @@ class StaleVersionError(RuntimeError):
 class ReviewOutcome:
     artifact: Artifact
     version: ArtifactVersion
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedApproval:
+    """One version a batch could not approve, and why.
+
+    Carried rather than raised: see :meth:`ReviewService.approve_many`.
+    """
+
+    version_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class BatchOutcome:
+    approved: tuple[ReviewOutcome, ...]
+    skipped: tuple[SkippedApproval, ...]
 
 
 class ReviewService:
@@ -118,14 +142,75 @@ class ReviewService:
         )
         return ReviewOutcome(artifact=artifact, version=version)
 
+    def approve_many(
+        self,
+        version_ids: Sequence[str],
+        *,
+        actor_id: str | None = None,
+        comment: str | None = None,
+    ) -> BatchOutcome:
+        """Approve a set of versions in one transaction (M3-09, risk R9).
+
+        **Why this exists.** Twenty scene images means twenty approvals, and at
+        that point the human gate is the bottleneck on the very first video —
+        R9 predicted it and the image fan-out delivered it. A reviewer scanning
+        a contact sheet decides *once*, about a set.
+
+        **Explicit version ids, not "everything pending".** The caller sends the
+        versions it actually put on screen. A server-side "approve whatever is
+        currently awaiting" would sweep up a scene that regenerated while the
+        reviewer was scrolling — the exact failure ``expected_version_no``
+        exists to prevent on the single-item path, reintroduced twenty at a
+        time.
+
+        **Partial success is the honest outcome**, so this returns rather than
+        raises. A version that raced ahead is skipped with its reason and the
+        other nineteen still land; failing the batch would make one stale tile
+        cost the reviewer the whole pass. Skips are per item and named, so the
+        UI can say which ones need another look.
+
+        Everything is in the caller's transaction, so a failure that *does*
+        escape rolls back the lot.
+        """
+        approved: list[ReviewOutcome] = []
+        skipped: list[SkippedApproval] = []
+
+        for version_id in version_ids:
+            try:
+                approved.append(
+                    self.approve(version_id, actor_id=actor_id, comment=comment)
+                )
+            except LookupError:
+                skipped.append(SkippedApproval(version_id, "not found"))
+            except IllegalTransitionError as exc:
+                # The FSM refusing is the ordinary case here, not an error: the
+                # tile was already approved, or a regeneration moved it back to
+                # GENERATING. Its own words are the most useful message.
+                skipped.append(SkippedApproval(version_id, str(exc)))
+
+        logger.info(
+            "batch approval",
+            extra={"approved": len(approved), "skipped": len(skipped)},
+        )
+        return BatchOutcome(approved=tuple(approved), skipped=tuple(skipped))
+
     def reject(
         self,
         version_id: str,
         *,
         actor_id: str | None = None,
         comment: str | None = None,
+        reasons: Sequence[str] | None = None,
         expected_version_no: int | None = None,
     ) -> ReviewOutcome:
+        """Reject a version, optionally saying **why** in structured form.
+
+        ``reasons`` is what makes the next attempt different (M3-10). Stored
+        verbatim; the vocabulary is the domain's
+        (:class:`videoforge_domain.rejection.RejectionReason`) and validation
+        happens at the API boundary, so a worker reading an older row is never
+        broken by a reason this build has retired.
+        """
         artifact, version = self._load(version_id, expected_version_no)
         transition = apply_event(ArtifactState(artifact.state), ArtifactEvent.REJECTED)
 
@@ -134,6 +219,7 @@ class ReviewService:
             decision=ReviewDecisionKind.REJECT,
             reviewer_id=actor_id,
             comment=comment,
+            reasons=reasons,
         )
         artifact.state = transition.to_state
         self._record(artifact, version, transition, actor_id, "artifact.rejected")
