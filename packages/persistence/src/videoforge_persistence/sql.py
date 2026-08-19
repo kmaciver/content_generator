@@ -29,6 +29,11 @@ IMMUTABLE_TABLES: tuple[str, ...] = (
     # "which scene is this an image of?" unanswerable.
     "scene_set",
     "scene",
+    # M5-03. A publishing package is the *output* of a version, built once from
+    # inputs that are themselves immutable. Rebuilding after a caption edit
+    # produces a new package version and a new row — an UPDATE here would
+    # silently change what a manifest a recipient already verified describes.
+    "publishing_package",
 )
 
 #: **Finding M1-04a: an immutable table may never be the source of an

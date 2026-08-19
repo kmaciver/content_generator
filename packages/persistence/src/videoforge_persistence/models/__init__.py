@@ -30,6 +30,7 @@ from videoforge_persistence.models.branding import (
 from videoforge_persistence.models.job import GenerationJob, ProviderUsage
 from videoforge_persistence.models.org import AppUser, Series, Workspace
 from videoforge_persistence.models.project import VideoProject
+from videoforge_persistence.models.publishing import PublishingPackage
 from videoforge_persistence.models.review import Comment, ReviewDecision
 from videoforge_persistence.models.scene import Scene, SceneSet
 
@@ -43,6 +44,7 @@ __all__ = [
     "GenerationJob",
     "OutboxEvent",
     "ProviderUsage",
+    "PublishingPackage",
     "ReviewDecision",
     "Scene",
     "SceneSet",

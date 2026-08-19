@@ -45,7 +45,7 @@ TOOL := docker run --rm \
 
 .PHONY: help tooling lock sync lint fmt fmt-check typecheck test check check-all \
         frontend-image lint-js typecheck-js fmt-js fmt-check-js check-js \
-        e2e e2e-image e2e-seed \
+        e2e e2e-image e2e-seed e2e-guard \
         up up-prod down ps logs status seed reset hooks clean \
         migrate migrate-check migrate-new migrate-history verify-secrets env-example \
         exit-test
@@ -151,7 +151,31 @@ e2e-image: ## Build the Playwright runner image
 e2e-seed:
 	$(COMPOSE_P) run --rm migrate python -m database.seed
 
-e2e: e2e-image e2e-seed ## Run the end-to-end suite (needs `make up-prod` first)
+# The suite must not be able to spend money (M4-12).
+#
+# `PROVIDERS__MODE` defaults to `mock` in the compose file and is overridden by
+# `.env`, which on a developer machine is usually `real` — so `make e2e` on a
+# working laptop billed the vendor for every run, and M4-12's flow drives
+# images and a full narration rather than stopping at script. CI never noticed:
+# it has no `.env`, so it gets the default and the suite is free there.
+#
+# Resolved by asking compose rather than by reading `.env`, because compose's
+# own precedence (file default → .env → shell) is the thing that decides what
+# the containers actually got, and any second implementation of it here would
+# be a guess. `record` is refused with `real`: it wraps live calls.
+e2e-guard:
+	@mode=$$($(COMPOSE_P) config 2>/dev/null \
+	  | grep -m1 'PROVIDERS__MODE:' | sed 's/.*: *//' | tr -d '"'); \
+	case "$$mode" in \
+	  real|record) \
+	    echo "refusing to run the e2e suite with PROVIDERS__MODE=$$mode:"; \
+	    echo "  it drives images and a full narration, and would bill the vendor."; \
+	    echo "  Set PROVIDERS__MODE=mock (or replay) in .env and \`make up-prod\`."; \
+	    exit 1 ;; \
+	  *) echo "provider mode: $${mode:-mock}" ;; \
+	esac
+
+e2e: e2e-guard e2e-image e2e-seed ## Run the end-to-end suite (needs `make up-prod` first)
 	docker run --rm \
 	  --network videoforge_default \
 	  -v "$(CURDIR)/apps/frontend":/app \

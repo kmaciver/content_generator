@@ -43,6 +43,30 @@ export interface VersionDetail extends VersionSummary {
    * composing that path is a second place that has to change when it moves —
    * which is exactly how the render's URL was wrong before M4-11. */
   asset_url: string | null;
+  /** Captions as the render will burn them, for versions that carry word
+   * timings. Grouped by the server from one implementation (`group_into_cues`)
+   * that the timeline compiler also reads — grouping here in TypeScript would
+   * be a second set of rules, and the preview drifting from the finished video
+   * is exactly what that costs. Empty for kinds that have no timings. */
+  caption_cues: CaptionCue[];
+}
+
+export interface CaptionCue {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+}
+
+/** One entry of a publishing package's manifest (M5-03).
+ *
+ * The `sha256` is the point: a zip already lists its own names, so what the
+ * manifest adds is the ability to *verify* a downloaded archive rather than
+ * trust it — ADR-004's rule carried past the boundary where the bytes leave
+ * the system. */
+export interface PackageFile {
+  path: string;
+  sha256: string;
+  bytes: number;
 }
 
 export interface ArtifactSummary {
@@ -53,6 +77,13 @@ export interface ArtifactSummary {
   current_version_no: number;
   stale_since: string | null;
   capabilities: Capabilities;
+  /** Which rejection reasons apply to this *kind* of artifact — server-owned,
+   * like `capabilities`, for the same reason: the rule lives in the domain and
+   * the client renders what it is given. Empty means comment-only. Every
+   * reason in the vocabulary describes a picture, so a narration, a script and
+   * a timeline all get none; rendering one hardcoded list offered "Anatomy"
+   * and "Text in image" on a voice take. */
+  rejection_reasons: RejectionReason[];
 }
 
 export interface ArtifactDetail extends ArtifactSummary {
@@ -272,7 +303,15 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   });
 
-  const payload = (await response.json()) as unknown;
+  // 204 has no body, and `response.json()` on an empty one throws
+  // `Unexpected end of JSON input` — which would surface as a parse error on a
+  // request that succeeded. Checked before parsing rather than caught after,
+  // so a genuinely malformed body still fails loudly.
+  const payload =
+    response.status === 204 || response.headers.get("content-length") === "0"
+      ? null
+      : ((await response.json()) as unknown);
+
   if (!response.ok) {
     // Surface the server's own message. Inventing a friendlier one client-side
     // would discard the correlation id, which is the only thing that connects
@@ -285,13 +324,29 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
   listProjects: () => call<{ items: ProjectSummary[] }>("/projects"),
 
-  createProject: (topic: string) =>
+  /** `seriesId` is optional to the server and effectively mandatory to a user
+   * who wants images: ADR-016 makes an approved character and style a
+   * *precondition* a project consumes, resolved from its series, and a project
+   * with no series is refused at image admission with a 409 that points at a
+   * screen it cannot reach. Found by M4-12 — the create form sent a topic and
+   * nothing else, so no project created through the UI could ever be
+   * illustrated. */
+  createProject: (topic: string, seriesId?: string | null) =>
     call<ProjectSummary>("/projects", {
       method: "POST",
-      body: JSON.stringify({ topic }),
+      body: JSON.stringify(
+        seriesId ? { topic, series_id: seriesId } : { topic },
+      ),
     }),
 
   getProject: (id: string) => call<ProjectDetail>(`/projects/${id}`),
+
+  /** **The only destroying call in this client.** Everything else appends —
+   * a rejection is a row, a regeneration is a new version. Cascades to every
+   * artifact, version, scene, job and package; leaves the audit trail (§10.3)
+   * and the stored bytes (shared between projects, ADR-004). 204, no body. */
+  deleteProject: (id: string) =>
+    call<null>(`/projects/${id}`, { method: "DELETE" }),
 
   getArtifact: (id: string) => call<ArtifactDetail>(`/artifacts/${id}`),
 
@@ -320,6 +375,17 @@ export const api = {
     ),
 
   getJob: (id: string) => call<JobResponse>(`/jobs/${id}`),
+
+  /** Free a stage whose job will never finish (M5-05).
+   *
+   * Keyed on the artifact because that is what this client has — a job id
+   * never reaches the browser. Lands the artifact in FAILED, which is
+   * retryable, so the ordinary Regenerate button is the next step and there is
+   * no second retry path to keep in step with the first. */
+  release: (artifactId: string) =>
+    call<ArtifactSummary>(`/artifacts/${artifactId}/release`, {
+      method: "POST",
+    }),
 
   approve: (versionId: string, expectedVersionNo: number, comment?: string) =>
     call<ArtifactSummary>(`/artifact-versions/${versionId}/reviews/approve`, {

@@ -79,8 +79,42 @@ stages:
     phase_generating: RENDERING
     phase_review: RENDER_REVIEW
 
-  - produces: package
+  # M5-01. The Instagram caption and hashtags, as a reviewable artifact.
+  #
+  # **`requires: [render]`, and that is a deliberate reversal.** The copy is
+  # derived from what the video *says*, not from its pixels, so on content
+  # grounds `[script]` is the honest dependency and would let a reviewer settle
+  # the caption while the media is still generating.
+  #
+  # It does not survive contact with how phase is derived. `Pipeline.stages` is
+  # a **topological** order — Kahn's, ties broken alphabetically — not the order
+  # of this file, and `derive_phase` reports the earliest stage in it that is
+  # not approved. A caption depending only on the script is topologically free
+  # to sort third, so a project whose scenes had not been written yet would
+  # report `PACKAGING`. Position in this file cannot fix that; only the edge can.
+  #
+  # The price is that re-rendering marks the caption stale (S2) even though a
+  # re-encode does not change what the video is about. That is a reviewer
+  # re-confirming text they already wrote, which is cheap and visible — against
+  # a phase that lies on the project list every time, which is neither. If
+  # phase derivation ever learns to distinguish "blocked on" from "not started",
+  # this edge is the first thing that should go back to `[script]`.
+  - produces: caption
     requires: [render]
+    queue: llm
+    phase_generating: PACKAGING
+    phase_review: PACKAGING
+
+  # M5-02. The Reels cover: an approved scene image with the hook typeset over
+  # it. Needs `image` for the picture and `caption` for the words.
+  - produces: thumbnail
+    requires: [image, caption]
+    queue: image
+    phase_generating: PACKAGING
+    phase_review: PACKAGING
+
+  - produces: package
+    requires: [render, caption, thumbnail]
     queue: package
     phase_generating: PACKAGING
     phase_review: READY_TO_PUBLISH

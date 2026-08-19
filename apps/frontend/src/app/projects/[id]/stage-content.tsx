@@ -1,5 +1,7 @@
 "use client";
 
+import type { CaptionCue, PackageFile } from "@/lib/api";
+
 import { NarrationPlayer, type VoiceSpan } from "./narration-player";
 import { RenderPlayer, type RenderMark } from "./render-player";
 
@@ -19,6 +21,7 @@ export function StageContent({
   content,
   meta,
   assetUrl,
+  captionCues,
 }: {
   kind: string;
   content: Record<string, unknown> | null | undefined;
@@ -26,6 +29,10 @@ export function StageContent({
    * the version's content column holds a storage key, not JSON. */
   meta?: Record<string, unknown>;
   assetUrl?: string | null;
+  /** Server-grouped captions, for the kinds that have word timings. Passed in
+   * rather than dug out of `meta`, because unlike everything else here they
+   * are derived at read time and not stored on the version. */
+  captionCues?: CaptionCue[];
 }) {
   if (kind === "voice") {
     // The narration is judged by listening, so the player *is* the viewer.
@@ -41,6 +48,7 @@ export function StageContent({
       <NarrationPlayer
         audioUrl={assetUrl}
         spans={spans}
+        cues={captionCues ?? []}
         durationMs={Number(meta?.duration_ms ?? 0)}
       />
     );
@@ -66,8 +74,198 @@ export function StageContent({
     );
   }
 
+  if (kind === "package") {
+    // **The review unit is the manifest, not a preview.** There is nothing to
+    // watch here — the video was reviewed at the render stage — and the
+    // questions left are "does it contain what it says" and "can I get it".
+    // So: every entry with its hash and size, and a download.
+    if (!assetUrl) {
+      return null;
+    }
+    const manifest = (meta?.manifest ?? {}) as Record<string, unknown>;
+    const files = Array.isArray(manifest.files)
+      ? (manifest.files as PackageFile[])
+      : [];
+    return (
+      <section className="flex flex-col gap-3" data-testid="package-review">
+        <div className="flex flex-wrap items-center gap-3">
+          <a
+            href={assetUrl}
+            download
+            data-testid="package-download"
+            className="rounded-md px-4 py-2 text-sm font-medium"
+            style={{
+              border: "1px solid var(--color-state-ok)",
+              color: "var(--color-state-ok)",
+            }}
+          >
+            Download package
+          </a>
+          <span className="text-xs" style={{ color: "var(--color-ink-muted)" }}>
+            {files.length} files · {formatBytes(Number(meta?.bytes ?? 0))}
+          </span>
+        </div>
+
+        {/* Hashes shown, not hidden behind a "verify" button. They are the
+            reason the manifest exists: a recipient can check the archive
+            rather than trust it (ADR-004, carried past the boundary where the
+            bytes leave the system). */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead style={{ color: "var(--color-ink-muted)" }}>
+              <tr>
+                <th className="py-1 pr-4 font-normal">File</th>
+                <th className="py-1 pr-4 font-normal">Size</th>
+                <th className="py-1 font-normal">sha256</th>
+              </tr>
+            </thead>
+            <tbody>
+              {files.map((file) => (
+                <tr key={file.path}>
+                  <td className="py-1 pr-4">{file.path}</td>
+                  <td
+                    className="py-1 pr-4 tabular-nums"
+                    style={{ color: "var(--color-ink-muted)" }}
+                  >
+                    {formatBytes(file.bytes)}
+                  </td>
+                  <td
+                    className="py-1 font-mono"
+                    style={{ color: "var(--color-ink-muted)" }}
+                    // The full digest, in a title: truncation is what makes a
+                    // hash unverifiable, and a reviewer who wants to check one
+                    // needs all of it.
+                    title={file.sha256}
+                  >
+                    {file.sha256.slice(0, 12)}…
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  }
+
+  if (kind === "image") {
+    // **One scene's frame — and this branch was simply missing.** Every other
+    // kind had one; `image` fell through to `if (!content) return null`, and
+    // an image version has no inline content (the CHECK permits a storage key
+    // *or* JSON, never both), so opening a scene showed an empty panel.
+    //
+    // It went unnoticed because the contact sheet renders pictures at the set
+    // level, so the *grid* always worked. The failure only appears where a
+    // reviewer opens one scene — which is exactly what they do after asking
+    // for a regeneration, to see whether the new version is any better.
+    if (!assetUrl) {
+      return null;
+    }
+    const dimensions =
+      meta?.width && meta?.height ? `${meta.width}×${meta.height}` : null;
+    return (
+      <section className="flex flex-col gap-2" data-testid="scene-frame">
+        {/* Big. This is where character drift, anatomy and stray text are
+            judged, and every one of those is invisible at thumbnail size —
+            the reasons in the rejection vocabulary are the specification for
+            how large this has to be. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={assetUrl}
+          alt={`Scene ${String(meta?.scene_index ?? "")}`}
+          className="w-full max-w-[420px] rounded-md"
+          style={{ border: "1px solid var(--color-border-subtle)" }}
+        />
+        <p className="text-xs" style={{ color: "var(--color-ink-muted)" }}>
+          {meta?.scene_index ? `Scene ${String(meta.scene_index)}` : null}
+          {dimensions ? ` · ${dimensions}` : null}
+          {meta?.kind === "card" ? " · card, rendered locally" : null}
+        </p>
+      </section>
+    );
+  }
+
+  if (kind === "thumbnail") {
+    // The cover, at the size it is actually judged at. A 1080-wide preview
+    // makes every cover look fine; the question a reviewer is answering is
+    // whether the hook is readable in a feed, so it is shown small — and
+    // beside it, cropped to the square the profile grid keeps (M5-02), which
+    // is where a hook placed too low disappears.
+    if (!assetUrl) {
+      return null;
+    }
+    return (
+      <section className="flex flex-wrap gap-4" data-testid="cover-preview">
+        <figure className="flex flex-col gap-1">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={assetUrl}
+            alt="Reels cover"
+            className="w-[160px] rounded-md"
+            style={{ border: "1px solid var(--color-border-subtle)" }}
+          />
+          <figcaption
+            className="text-xs"
+            style={{ color: "var(--color-ink-muted)" }}
+          >
+            In feed · 9:16
+          </figcaption>
+        </figure>
+        <figure className="flex flex-col gap-1">
+          <div
+            className="size-[160px] overflow-hidden rounded-md"
+            style={{ border: "1px solid var(--color-border-subtle)" }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={assetUrl}
+              alt="Reels cover, cropped to the profile grid"
+              data-testid="cover-cropped"
+              className="size-full object-cover"
+            />
+          </div>
+          <figcaption
+            className="text-xs"
+            style={{ color: "var(--color-ink-muted)" }}
+          >
+            On the grid · 1:1
+          </figcaption>
+        </figure>
+        {meta?.hook ? (
+          <p className="self-center text-sm">{String(meta.hook)}</p>
+        ) : null}
+      </section>
+    );
+  }
+
   if (!content) {
     return null;
+  }
+
+  if (kind === "caption") {
+    const hashtags = Array.isArray(content.hashtags) ? content.hashtags : [];
+    const caption = String(content.caption ?? "");
+    return (
+      <div className="flex flex-col gap-3" data-testid="caption-review">
+        {/* What a scroller sees before the "more" link. Server-derived
+            (`preview`) so the 125-character rule lives in one place. */}
+        {content.preview ? (
+          <p className="text-xs" style={{ color: "var(--color-ink-muted)" }}>
+            Before “more”: {String(content.preview)}
+          </p>
+        ) : null}
+        <p className="whitespace-pre-wrap">{caption}</p>
+        {hashtags.length > 0 ? (
+          <p className="text-sm" style={{ color: "var(--color-ink-muted)" }}>
+            {hashtags.map((tag) => `#${String(tag)}`).join(" ")}
+          </p>
+        ) : null}
+        <p className="text-xs" style={{ color: "var(--color-ink-muted)" }}>
+          {caption.length} / 2200 characters · {hashtags.length} hashtags · hook
+          “{String(content.hook ?? "")}”
+        </p>
+      </div>
+    );
   }
 
   if (kind === "script") {
@@ -274,4 +472,21 @@ function TimelineSummary({ content }: { content: Record<string, unknown> }) {
       </ol>
     </section>
   );
+}
+
+/** Bytes, at the precision a person actually reads.
+ *
+ * Binary units (1024) rather than decimal, because that is what every file
+ * manager showing this same archive will say — a package listed as 12.6 MB
+ * here and 12.0 MB in Finder reads as two different files.
+ */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const power = Math.min(
+    units.length - 1,
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+  );
+  const value = bytes / 1024 ** power;
+  return `${power === 0 ? value : value.toFixed(1)} ${units[power]}`;
 }

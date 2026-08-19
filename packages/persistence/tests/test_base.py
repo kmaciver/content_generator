@@ -66,6 +66,10 @@ class TestNamingConvention:
             "series_character",
             "character_reference",
             "series_style",
+            # M5-03 — the assembled archive and its manifest. An
+            # artifact_version extension like `scene_set`: a package is
+            # content, so rebuilding one produces a new version and a new row.
+            "publishing_package",
         }
 
 

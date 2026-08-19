@@ -58,7 +58,10 @@ export async function backendFetch<T>(
 
   return {
     status: response.status,
-    body: (await response.json()) as T,
+    // A 204 has no body, and `.json()` on an empty one throws `Unexpected end
+    // of JSON input` — turning a successful DELETE into a parse error. Checked
+    // rather than caught, so a genuinely malformed body still fails loudly.
+    body: (response.status === 204 ? null : await response.json()) as T,
     correlationId: response.headers.get(CORRELATION_HEADER),
   };
 }

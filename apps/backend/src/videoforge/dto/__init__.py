@@ -21,7 +21,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from videoforge_domain.artifact_lifecycle import can_regenerate, capabilities
-from videoforge_domain.rejection import RejectionReason
+from videoforge_domain.captions import group_into_cues
+from videoforge_domain.rejection import RejectionReason, reasons_for
+from videoforge_domain.timing import WordTiming
 from videoforge_persistence.models import (
     Artifact,
     ArtifactVersion,
@@ -50,6 +52,7 @@ __all__ = [
     "ArtifactSummary",
     "BatchReviewResult",
     "BrandingDetail",
+    "CaptionCuePreview",
     "CharacterSummary",
     "CommentRequest",
     "ContactSheet",
@@ -176,6 +179,20 @@ class VersionSummary(BaseModel):
         )
 
 
+class CaptionCuePreview(BaseModel):
+    """One caption, as the review player should show it.
+
+    Structurally the timeline's ``CaptionCue``, and deliberately not imported
+    from it: the backend does not depend on ``videoforge_timeline``, and this
+    is not a timeline — it is a preview of what the burn will say, available
+    before any timeline exists.
+    """
+
+    text: str
+    start_ms: int
+    end_ms: int
+
+
 class VersionDetail(VersionSummary):
     content: dict[str, Any] | None = None
     storage_key: str | None = None
@@ -191,6 +208,24 @@ class VersionDetail(VersionSummary):
     #: the artifacts bucket, so the client's guess would have 403'd on the
     #: first video the pipeline ever produced.
     asset_url: str | None = None
+    #: Captions as the render will burn them, for versions that carry word
+    #: timings — today, ``voice``.
+    #:
+    #: **Derived here rather than stored**, which is the opposite of what
+    #: ``meta.spans`` does, and for a reason. Spans are a *measurement* of an
+    #: approved narration: re-deriving them later against a different build
+    #: would silently re-time audio a human already signed off. Grouping is a
+    #: *presentation* choice made fresh at every timeline compile, so a cue
+    #: stored beside the voice would go stale the moment the rules changed and
+    #: would then disagree with the very thing it claims to preview.
+    #:
+    #: Sent from the server for the same reason ``capabilities`` and
+    #: ``rejection_reasons`` are: one implementation of the rule
+    #: (:func:`videoforge_domain.captions.group_into_cues`), read by the
+    #: compiler and by this response. Grouping in TypeScript would be the
+    #: second implementation S8 was withdrawn to avoid — and the reason the
+    #: player showed one word at a time while the burn showed phrases.
+    caption_cues: list[CaptionCuePreview] = Field(default_factory=list)
 
     @classmethod
     def of_detail(
@@ -201,19 +236,74 @@ class VersionDetail(VersionSummary):
         bucket: str | None = None,
     ) -> VersionDetail:
         summary = VersionSummary.of(version, status)
+        meta = dict(version.meta or {})
         return cls(
             **summary.model_dump(),
             content=version.inline_content,
             storage_key=version.storage_key,
             content_hash=version.content_hash,
-            meta=dict(version.meta or {}),
+            meta=meta,
             parent_version_id=version.parent_version_id,
             asset_url=(
                 f"/assets/{bucket}/{version.storage_key}"
                 if bucket and version.storage_key
                 else None
             ),
+            caption_cues=_caption_cues(meta),
         )
+
+
+def _caption_cues(meta: dict[str, Any]) -> list[CaptionCuePreview]:
+    """Group a voice version's stored spans into the cues the burn will show.
+
+    Per span, never across one: a cue spanning a scene change would stay on
+    screen while the image cut underneath it. The compiler enforces the same
+    boundary by construction, by grouping one scene's words at a time.
+
+    **Card scenes are skipped**, matching ``CompileOptions.caption_cards``:
+    a card is already text on screen and a caption over it competes with the
+    words the scene exists to show. Spans written before M4-01 carry no
+    ``kind``, so an absent one reads as ``illustration`` — the same direction
+    ``_kind_of`` fails in, and the shape every pre-M4 scene had.
+
+    Grouping knobs are left at their defaults, which is also what
+    ``timeline.compile`` passes today — ``CompileOptions`` exposes
+    ``caption_max_characters`` and ``caption_target_dwell_ms`` and the stage
+    sets neither. The day one side starts tuning them, this side has to read
+    the same numbers or the preview stops being one.
+
+    Anything malformed yields no cues rather than a 500: this is a preview
+    beside a working audio player, and a reviewer who can still listen has
+    lost less than one who gets an error page.
+    """
+    spans = meta.get("spans")
+    if not isinstance(spans, list):
+        return []
+
+    cues: list[CaptionCuePreview] = []
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        if str(span.get("kind") or SceneKind.ILLUSTRATION) == SceneKind.CARD:
+            continue
+        words = [
+            WordTiming(
+                text=str(word["text"]),
+                start_ms=int(word["start_ms"]),
+                end_ms=int(word["end_ms"]),
+                # Unused by the grouping, which reads text and times only. The
+                # offset is into the original script and no longer recoverable
+                # from what was stored.
+                offset=0,
+            )
+            for word in span.get("words") or []
+            if isinstance(word, dict) and {"text", "start_ms", "end_ms"} <= word.keys()
+        ]
+        cues.extend(
+            CaptionCuePreview(text=cue.text, start_ms=cue.start_ms, end_ms=cue.end_ms)
+            for cue in group_into_cues(words)
+        )
+    return cues
 
 
 class ArtifactSummary(BaseModel):
@@ -226,17 +316,28 @@ class ArtifactSummary(BaseModel):
     #: What the FSM permits right now. The UI renders buttons from this and
     #: never decides for itself (§11).
     capabilities: dict[str, bool]
+    #: Which structured rejection reasons apply to **this kind** of artifact.
+    #:
+    #: Sent for the same reason ``capabilities`` is: the server owns the rule
+    #: and the client renders what it is given. The review screen used to
+    #: render one hardcoded list on every rejectable artifact, so a reviewer
+    #: rejecting a narration was offered "Anatomy" and "Text in image" — nine
+    #: image failure modes, none of which a voice take can have. Empty is a
+    #: real answer and means "comment only".
+    rejection_reasons: list[str] = Field(default_factory=list)
 
     @classmethod
     def of(cls, artifact: Artifact) -> ArtifactSummary:
+        kind = ArtifactKind(artifact.kind)
         return cls(
             id=artifact.id,
-            kind=artifact.kind.value,
+            kind=kind.value,
             scene_ref=artifact.scene_ref,
             state=artifact.state.value,
             current_version_no=artifact.current_version_no,
             stale_since=artifact.stale_since,
             capabilities=capabilities(ArtifactState(artifact.state)),
+            rejection_reasons=[reason.value for reason in reasons_for(kind)],
         )
 
 

@@ -13,9 +13,15 @@ the outline model below are measured rather than guessed, and the container
 already asserts at build time that libass can resolve the font.
 
 **Grouping is not decided here.** ``videoforge_domain.captions`` owns it and
-the timeline carries the result, so this writer, the compiler, and the review
-player all render the same cues. That is the drift S8 was withdrawn over —
-avoided by having one implementation rather than by generating two.
+the timeline carries the result, so this writer and the compiler render the
+same cues from one implementation.
+
+**The review player reads the same cues.** It briefly did not — it kept showing
+one word at a time from M3-12's raw spans after grouping arrived, so a
+reviewer's preview and the burned video disagreed about where a caption
+started. It now takes cues from the voice version endpoint, which groups them
+with ``group_into_cues`` exactly as the compiler does. The player never regroups
+in TypeScript; that would restore the agreement and keep the cause.
 
 Three format details that are easy to get wrong and expensive to discover in
 a render:
@@ -58,18 +64,29 @@ class CaptionLine:
     end_ms: int
 
 
+#: Font size as a fraction of frame width. 0.0667 × 1080 = 72px, which is what
+#: a 22-character phrase in bold DejaVu needs to fit the text area — M0-09's
+#: 110px was sized for a *single word* and runs off the frame now that cues are
+#: phrases.
+#:
+#: **A fraction rather than a constant**, because libass sizes against
+#: ``PlayResX`` and this writer is handed whatever the timeline says. A fixed
+#: 72 is correct at 1080 and absurd at 320, where it wrapped a three-word cue
+#: onto three lines — found by M4-10 rendering at a test resolution, and a
+#: latent bug for any future format that is not 9:16 at 1080.
+_FONT_SIZE_RATIO = 0.0667
+
+
 @dataclass(frozen=True, slots=True)
 class AssStyle:
     """The caption's look.
 
-    ``font_size`` is the one value here that is a real constraint rather than
-    a preference: at 1080 wide, a 22-character phrase in bold DejaVu needs
-    roughly 70px to fit the text area. M0-09's 110px was sized for a *single
-    word* and would run off the frame now that cues are phrases.
+    ``font_size`` is ``None`` by default and derived from the frame width; set
+    it to pin an absolute size.
     """
 
     font_name: str = "DejaVu Sans"
-    font_size: int = 72
+    font_size: int | None = None
     #: Fill and outline, as RGB — converted to ASS's BGR order on the way out
     #: so nobody has to write &H00FFFFFF and hope.
     fill: str = "#FFFFFF"
@@ -97,6 +114,7 @@ def ass_document(
     second implementation of an invariant is a second thing to keep true.
     """
     chosen = style or AssStyle()
+    font_size = chosen.font_size or max(12, round(width * _FONT_SIZE_RATIO))
     x = width // 2
     y = int(height * CAPTION_BAND)
 
@@ -125,11 +143,11 @@ def ass_document(
         "Style: Caption,{font},{size},{fill},{fill},{outline},&H00000000,"
         "1,0,0,0,100,100,0,0,1,{border},0,5,{margin},{margin},0,1".format(
             font=chosen.font_name,
-            size=chosen.font_size,
+            size=font_size,
             fill=_ass_colour(chosen.fill),
             outline=_ass_colour(chosen.outline),
-            border=chosen.outline_width,
-            margin=chosen.margin,
+            border=max(1, round(chosen.outline_width * font_size / 72)),
+            margin=max(8, round(chosen.margin * width / 1080)),
         ),
         "",
         "[Events]",

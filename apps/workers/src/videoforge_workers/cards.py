@@ -47,8 +47,13 @@ from PIL import Image, ImageDraw, ImageFont
 __all__ = [
     "CardPalette",
     "DEFAULT_FONT_PATHS",
+    "draw_text_block",
+    "fit_text",
+    "load_font",
+    "measure_width",
     "palette_from_style",
     "render_card",
+    "text_block_height",
 ]
 
 #: Searched in order; the first that exists wins. ``VIDEOFORGE_CARD_FONT``
@@ -161,8 +166,16 @@ def render_card(
 
     _draw_box(draw, width=width, height=height, ink=palette.ink)
 
-    font, lines = _fit(draw, words, width=width, height=height, font_path=font_path)
-    _draw_lines(draw, lines, font=font, width=width, height=height, ink=palette.ink)
+    font, lines = fit_text(
+        draw,
+        words,
+        max_width=width * _TEXT_WIDTH,
+        max_height=height * _TEXT_HEIGHT,
+        font_path=font_path,
+    )
+    draw_text_block(
+        draw, lines, font=font, centre=(width / 2, height / 2), ink=palette.ink
+    )
 
     buffer = io.BytesIO()
     # ``optimize`` is deterministic in Pillow and shaves roughly a third off a
@@ -186,12 +199,12 @@ def _draw_box(draw: ImageDraw.ImageDraw, *, width: int, height: int, ink: str) -
     )
 
 
-def _fit(
+def fit_text(
     draw: ImageDraw.ImageDraw,
     words: list[str],
     *,
-    width: int,
-    height: int,
+    max_width: float,
+    max_height: float,
     font_path: str | None,
 ) -> tuple[ImageFont.FreeTypeFont, list[str]]:
     """Largest ladder size that fits **on the fewest lines the text allows**.
@@ -206,10 +219,16 @@ def _fit(
     Falls back to the smallest size rather than raising. 60 characters at 48pt
     across three lines is legible, and a card that renders a little cramped
     beats a job that fails on text a human already approved.
+
+    **Takes a box rather than a frame** (M5-02). It used to derive the text
+    area from the card's own proportions, which was right while cards were the
+    only caller; the Reels cover typesets into the safe square of a photograph
+    instead. The measuring rules are identical and there should be exactly one
+    of them.
     """
     path = _font_path(font_path)
-    max_w = width * _TEXT_WIDTH
-    max_h = height * _TEXT_HEIGHT
+    max_w = max_width
+    max_h = max_height
 
     smallest = _load(path, _SIZE_LADDER[-1])
     floor = _wrap(draw, words, smallest, max_w)
@@ -250,28 +269,44 @@ def _wrap(
     return lines
 
 
-def _draw_lines(
+def draw_text_block(
     draw: ImageDraw.ImageDraw,
     lines: list[str],
     *,
     font: ImageFont.FreeTypeFont,
-    width: int,
-    height: int,
+    centre: tuple[float, float],
     ink: str,
 ) -> None:
-    """Centred as a block, each line centred within it."""
+    """Centred as a block on ``centre``, each line centred within it.
+
+    Takes a centre point rather than a frame for the same reason
+    :func:`fit_text` takes a box: the cover's text sits low in the safe square,
+    not in the middle of the picture.
+    """
     line_h = _line_height(draw, font)
     block_h = line_h * len(lines)
-    y = (height - block_h) / 2
+    centre_x, centre_y = centre
+    y = centre_y - block_h / 2
     for line in lines:
         draw.text(
-            (width / 2, y + line_h / 2),
+            (centre_x, y + line_h / 2),
             line,
             font=font,
             fill=ink,
             anchor="mm",
         )
         y += line_h
+
+
+def text_block_height(
+    draw: ImageDraw.ImageDraw, lines: list[str], font: ImageFont.FreeTypeFont
+) -> float:
+    """How tall :func:`draw_text_block` will render ``lines``.
+
+    Public because the cover has to draw a scrim *behind* the text and cannot
+    size one without knowing this first.
+    """
+    return _block_height(draw, lines, font)
 
 
 def _text_width(
@@ -310,6 +345,22 @@ def _font_path(override: str | None) -> str:
         "no card font found; install fonts-dejavu-core or set "
         "VIDEOFORGE_CARD_FONT to a TTF path"
     )
+
+
+def load_font(size: int, *, font_path: str | None = None) -> ImageFont.FreeTypeFont:
+    """The card face at ``size``, resolving the same font search as everything
+    else here. Public so the cover can shrink below the ladder — see
+    ``cover._typeset`` for why only it needs to."""
+    return _load(_font_path(font_path), size)
+
+
+def measure_width(
+    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont
+) -> float:
+    """How wide ``text`` renders. Public for the same reason as
+    :func:`load_font`: a second implementation of "does this fit" is a second
+    thing to keep true."""
+    return _text_width(draw, text, font)
 
 
 def _load(path: str, size: int) -> ImageFont.FreeTypeFont:

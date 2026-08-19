@@ -2,23 +2,36 @@
 
 import { useEffect, useRef, useState } from "react";
 
-/** The narration review player (M3-12).
+import type { CaptionCue } from "@/lib/api";
+
+/** The narration review player (M3-12, re-captioned in M4).
  *
  * **What a reviewer is actually judging** is whether the narration sounds like
  * one continuous read and whether each scene's words land while the right image
  * is on screen. So this plays the real audio against the real timings and shows
- * the caption exactly as the renderer will: one word at a time, centred, in the
- * caption band — §1.0.2 measured that as the format, and a player that showed a
- * scrolling transcript instead would let a mistimed word through unnoticed.
+ * the caption exactly as the renderer will: centred, in the caption band
+ * §1.0.2 measured. A player that showed a scrolling transcript instead would
+ * let a mistimed caption through unnoticed.
  *
- * It is **not** the renderer. FFmpeg burns an ASS subtitle track at encode time
- * from these same spans; this is a preview of that, in the browser, before
- * anything is encoded. The two agree because they read one source — the spans
- * stored on the voice artifact — rather than each deriving their own.
+ * It is **not** the renderer. FFmpeg burns an ASS subtitle track at encode
+ * time; this is a preview of that, in the browser, before anything is encoded.
  *
- * Driven by `timeupdate` rather than a `requestAnimationFrame` loop: the word
- * granularity here is ~0.4s and the audio element is the clock that matters, so
- * a 60fps loop would burn battery to re-render the same word sixty times.
+ * **Cues, not words, and they come from the server.** This player originally
+ * showed one word at a time from the raw spans, which was right when M3-12 was
+ * written and became wrong the moment M4-04 grouped captions into phrases: the
+ * preview and the finished video then disagreed about where a caption starts.
+ * They agree again because both read one implementation — `group_into_cues` in
+ * `videoforge_domain.captions`, called by the timeline compiler and by the
+ * version endpoint. Regrouping here in TypeScript would have restored the
+ * agreement and reintroduced the cause.
+ *
+ * Spans are still passed, and still carry their words: they are what the scene
+ * strip and the frame preview are keyed on, and they are the *measurement* the
+ * cues are grouped from.
+ *
+ * Driven by `timeupdate` rather than a `requestAnimationFrame` loop: cue
+ * granularity is most of a second and the audio element is the clock that
+ * matters, so a 60fps loop would burn battery re-rendering the same phrase.
  */
 export interface VoiceWord {
   text: string;
@@ -37,13 +50,18 @@ export interface VoiceSpan {
 export function NarrationPlayer({
   audioUrl,
   spans,
+  cues,
   durationMs,
   frames,
 }: {
   audioUrl: string;
   spans: VoiceSpan[];
+  /** Server-grouped captions. Empty is a real answer — an older voice version
+   * whose stored spans predate the grouping still plays, with no caption,
+   * rather than falling back to per-word text the render would not burn. */
+  cues: CaptionCue[];
   durationMs: number;
-  /** Scene id → image URL, so the preview shows the frame the word lands on. */
+  /** Scene id → image URL, so the preview shows the frame the cue lands on. */
   frames?: Record<string, string>;
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -62,13 +80,17 @@ export function NarrationPlayer({
   }, []);
 
   // Derived from the clock, not stored. Two pieces of state that could
-  // disagree — "which scene" and "which word" — would drift the moment a
+  // disagree — "which scene" and "which caption" — would drift the moment a
   // reviewer scrubbed.
   const span = spans.find(
     (s) => positionMs >= s.start_ms && positionMs < s.end_ms,
   );
-  const word = span?.words.find(
-    (w) => positionMs >= w.start_ms && positionMs < w.end_ms,
+  // Searched flat rather than within the span. Cues are grouped per scene on
+  // the server, so one cannot straddle a boundary and the two searches give
+  // the same answer — but the flat one does not go blank when the caption is
+  // right and the span lookup happens to miss.
+  const cue = cues.find(
+    (c) => positionMs >= c.start_ms && positionMs < c.end_ms,
   );
   const frame = span && frames ? frames[span.scene_id] : undefined;
 
@@ -86,6 +108,10 @@ export function NarrationPlayer({
         style={{
           background: "var(--color-surface)",
           border: "1px solid var(--color-border-subtle)",
+          // So the caption below can size in `cqw` against *this* box rather
+          // than the viewport. Without it the preview's caption scales with
+          // the browser window, which is not what the render does.
+          containerType: "inline-size",
         }}
       >
         {frame ? (
@@ -103,21 +129,30 @@ export function NarrationPlayer({
 
         {/* 57% down the frame, centred: the caption band §1.0.2 measured, and
             the same position `ass_document` writes into \pos(). Heavy outline
-            rather than a box, matching the reference. */}
-        {word ? (
+            rather than a box, matching the reference. `balance` so a two-line
+            cue splits evenly, which is what libass's WrapStyle 0 does. */}
+        {cue ? (
           <span
-            data-testid="caption-word"
+            data-testid="caption-cue"
             aria-live="off"
             className="absolute left-1/2 -translate-x-1/2 -translate-y-1/2 text-center font-bold"
             style={{
               top: "57%",
-              fontSize: "clamp(18px, 7cqw, 34px)",
+              // 85% of the frame: the ASS style's 80px margins at PlayResX
+              // 1080, so a cue that wraps here wraps in the render too.
+              maxWidth: "85%",
+              textWrap: "balance",
+              // `_FONT_SIZE_RATIO` exactly: 6.67% of frame width is the 72px
+              // the ASS writer uses at 1080, so a cue that fits on one line
+              // here fits on one line in the burn.
+              fontSize: "6.67cqw",
+              lineHeight: 1.15,
               color: "#FFFFFF",
               textShadow:
                 "0 0 6px #000, 2px 2px 0 #000, -2px 2px 0 #000, 2px -2px 0 #000, -2px -2px 0 #000",
             }}
           >
-            {word.text}
+            {cue.text}
           </span>
         ) : null}
       </div>

@@ -259,6 +259,11 @@ services:
       NODE_ENV: "production"
       BACKEND_INTERNAL_URL: "http://backend:5000"
       API_TOKEN: "${API_TOKEN:-dev-token-change-me}"
+      # Only the dev profile's `/assets/` route follows the backend's
+      # X-Accel-Redirect itself; under nginx that location never reaches Next.
+      # Set here rather than only in compose.dev so the two profiles differ in
+      # *routing* and not in configuration.
+      STORAGE_INTERNAL_URL: "http://minio:9000"
     healthcheck:
       test:
         ["CMD", "node", "-e",
@@ -340,7 +345,28 @@ services:
       ["celery", "-A", "videoforge_workers.celery_app", "worker",
        "-Q", "render", "--concurrency", "1", "--prefetch-multiplier", "1"]
     cpus: 2.0
-    mem_limit: 2g
+    # **Sized from measurement, after 2g killed a real render.** An 11-scene
+    # 114s video was SIGKILLed mid-encode (rc=-9, `OOMKilled: true`) because
+    # ffmpeg peaked at 2121 MB against the 2048 MB cap — over by 70 MB, which
+    # is why it died two thirds of the way through rather than at once.
+    #
+    # Measured on the failing timeline, 1080x1920@30, by truncating it:
+    #
+    #     4 clips /  37s  →  1295 MB
+    #     7 clips /  62s  →  1647 MB
+    #    11 clips / 114s  →  2121 MB
+    #
+    # **Memory tracks scene count, not duration** — roughly 120 MB per clip
+    # over an ~800 MB floor, because each clip is a parallel `-loop 1` branch
+    # feeding a sequential xfade chain and each branch holds a frame buffer.
+    # Tripling the duration cost 64% more memory; adding seven clips cost 826.
+    #
+    # 6g therefore covers NF10's ceiling (15-25 scenes ≈ 2.6-3.8 GB) with
+    # headroom, and the growth is linear rather than runaway — this is a limit
+    # that was set before anything rendered more than four scenes, not a leak.
+    # Lower it with RENDER_MEM_LIMIT on a machine that cannot spare it, and
+    # expect roughly `0.8 + 0.12 x scenes` GB.
+    mem_limit: "${RENDER_MEM_LIMIT:-6g}"
 
   # Separate, single-instance, and never scaled (B6). Running beat inside a
   # worker means `--scale` silently produces two schedulers, which drains the

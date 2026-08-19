@@ -154,6 +154,11 @@ def _context_for(name: str) -> dict[str, object]:
     contexts: dict[str, dict[str, object]] = {
         "script": {"topic": "tides", "target_seconds": 50, "research": None},
         "research": {"topic": "tides", "target_seconds": 50},
+        "caption": {
+            "topic": "tides",
+            "title": "Why the sea breathes",
+            "script": "The moon pulls the water toward it.",
+        },
         "scenes": {
             "title": "Tides",
             "script": "The moon pulls.",

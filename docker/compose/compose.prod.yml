@@ -3,7 +3,8 @@
 #
 # The fidelity loop (SADD §9.3). Same images and same topology as development,
 # but exercising the parts the dev profile skips:
-#   * nginx is the ONLY entry point; no store or app port is published
+#   * nginx is the only *application* entry point; no app port is published
+#     (Postgres publishes on loopback for a local DB client — see the service)
 #   * uWSGI over the unix socket, not the Flask dev server
 #   * no source bind-mounts — the image is the artifact
 #   * JSON logs, restart policies, resource limits
@@ -16,6 +17,21 @@ services:
 
   postgres:
     restart: unless-stopped
+    # Published for a database client (DBeaver, psql) on the developer's own
+    # machine. This is the one deliberate hole in "nginx is the only entry
+    # point", and it is bounded rather than waived:
+    #
+    #   * **Bound to 127.0.0.1**, unlike the dev profile's `5432:5432`, which
+    #     listens on every interface. Loopback is everything a local client
+    #     needs and nothing a laptop on café wifi should offer.
+    #   * The application containers still reach Postgres over the compose
+    #     network on the service name, so nothing about the topology under test
+    #     changes — remove this block and the stack behaves identically.
+    #
+    # Real deployments must not copy it; §24's migration notes are where the
+    # managed-database story belongs.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT_HOST:-5432}:5432"
 
   redis:
     restart: unless-stopped

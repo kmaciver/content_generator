@@ -28,9 +28,15 @@ cap fires before the dwell target and the two stop interacting — measured, a
 30-character cap produced output identical to 22. Widening this therefore does
 nothing on its own; the dwell target has to move with it.
 
-Pure, and deliberately separate from the ASS writer (M4-05) and from the
-review player: all three read *these* cues, so a preview and a burn cannot
-disagree about where a caption starts.
+Pure, and deliberately separate from the ASS writer (M4-05): both it and the
+timeline compiler read *these* cues, so the burn and the artifact cannot
+disagree.
+
+**The review player is on this too.** It renders cues the *API* derives by
+calling this function on the voice version's stored spans — derived on read,
+not stored, because grouping is a presentation choice and a cue frozen beside
+the audio would go stale the moment these rules changed. Nothing regroups in
+TypeScript, which would be the drift S8 was withdrawn to avoid.
 """
 
 from __future__ import annotations

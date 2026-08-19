@@ -81,7 +81,13 @@ async function proxy(request: NextRequest, segments: string[]) {
       headers: hasBody ? { "Content-Type": "application/json" } : undefined,
     });
 
-    const response = NextResponse.json(responseBody, { status });
+    // `NextResponse.json` cannot carry a 204 — the fetch spec forbids a body
+    // on one, and undici throws rather than dropping it. So a no-content
+    // response is passed through as one instead of being re-wrapped.
+    const response =
+      status === 204
+        ? new NextResponse(null, { status })
+        : NextResponse.json(responseBody, { status });
     if (downstreamId) {
       response.headers.set(CORRELATION_HEADER, downstreamId);
     }
@@ -112,5 +118,13 @@ export async function POST(request: NextRequest, context: Context) {
 }
 
 export async function PUT(request: NextRequest, context: Context) {
+  return proxy(request, (await context.params).path);
+}
+
+// Added with project deletion (M5). Its absence was not a policy — the
+// allowlist above is what decides which paths are reachable, and a missing
+// method verb just makes Next answer 405 to a request the API would have
+// accepted. The allowlist still applies here exactly as it does to POST.
+export async function DELETE(request: NextRequest, context: Context) {
   return proxy(request, (await context.params).path);
 }

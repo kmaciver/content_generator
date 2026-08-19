@@ -33,6 +33,7 @@ from videoforge_domain.timing import scene_spans, words_from_characters
 from videoforge_providers.models import VoiceRequest
 from videoforge_providers.protocols import VoiceProvider
 from videoforge_providers.registry import build_voice_provider
+from videoforge_shared.enums import SceneKind
 from videoforge_shared.settings import load_worker_settings
 from videoforge_shared.storage import StorageClient, storage_client_from_settings
 from videoforge_shared.tasks import VOICE_GENERATE
@@ -116,6 +117,11 @@ def voice_body(ctx: JobContext) -> None:
                 {
                     "scene_index": span.scene_index,
                     "scene_id": scene.id,
+                    # Carried so a *reader* of these spans can group captions
+                    # the way the compiler will: it skips cards, because a card
+                    # is already text on screen. Without this the review
+                    # player would preview a caption the render never burns.
+                    "kind": SceneKind(scene.kind).value,
                     "start_ms": span.start_ms,
                     "end_ms": span.end_ms,
                     "words": [

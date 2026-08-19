@@ -203,8 +203,24 @@ class TestShippedDeclaration:
             "voice": "voice",
             "timeline": "timeline",
             "render": "render",
+            # M5-01/02. `thumbnail` is on `image` despite calling no provider:
+            # that worker carries the fonts and Pillow M4-02 put there.
+            "caption": "llm",
+            "thumbnail": "image",
             "package": "package",
         }
+
+    def test_the_publish_stages_come_after_the_render(self, pipeline: Pipeline) -> None:
+        """**Order here is not cosmetic.** ``Pipeline.stages`` is the sequence
+        ``derive_phase`` walks, returning the earliest stage that is not
+        approved — so a caption that depended only on ``script`` would sort
+        third and report ``PACKAGING`` for a project that had not written its
+        scenes yet. The edge to ``render`` is what holds it back, and this is
+        the assertion that says so."""
+        order = [stage.produces.value for stage in pipeline.stages]
+        assert order.index("caption") > order.index("render")
+        assert order.index("thumbnail") > order.index("caption")
+        assert order[-1] == "package"
 
     def test_a_project_starts_at_research(self, pipeline: Pipeline) -> None:
         assert pipeline.roots() == frozenset({ArtifactKind.RESEARCH})

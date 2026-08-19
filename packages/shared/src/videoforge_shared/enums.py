@@ -51,6 +51,16 @@ class ArtifactKind(StrEnum):
     VOICE = "voice"
     TIMELINE = "timeline"
     RENDER = "render"
+    #: M5-01. The post copy — Instagram caption and hashtags — as a reviewable,
+    #: editable artifact rather than something the packager writes on its way
+    #: past. It is the text that actually gets published, so it is the one most
+    #: likely to be edited by hand, and a review unit of "a zip file" is not a
+    #: review unit at all.
+    CAPTION = "caption"
+    #: M5-02. The Reels cover: an approved scene image with the hook typeset
+    #: over it. A picture a human should look at before it represents the
+    #: video, hence an artifact and not a byproduct of packaging.
+    THUMBNAIL = "thumbnail"
     PACKAGE = "package"
     MUSIC = "music"
 

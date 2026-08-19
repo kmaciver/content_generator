@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from videoforge_shared.enums import ArtifactKind
 
 __all__ = [
+    "CAPTION_GENERATE",
     "DRAIN_OUTBOX",
     "IMAGES_GENERATE",
+    "PACKAGE_ASSEMBLE",
     "VOICE_GENERATE",
     "PING",
     "PROMPTS_GENERATE",
@@ -35,6 +37,7 @@ __all__ = [
     "RENDER_HELLO",
     "SCRIPT_GENERATE",
     "STAGE_TASKS",
+    "THUMBNAIL_GENERATE",
     "TIMELINE_COMPILE",
     "TaskSpec",
 ]
@@ -81,6 +84,20 @@ TIMELINE_COMPILE = TaskSpec("timeline.compile", "timeline")
 #: at its most extreme.
 RENDER_GENERATE = TaskSpec("render.generate", "render")
 
+#: M5-01. An ordinary LLM stage, so ``llm`` — it is one short completion and
+#: has no reason to be special.
+CAPTION_GENERATE = TaskSpec("caption.generate", "llm")
+
+#: M5-02. On ``image`` despite calling no provider: it composes a picture with
+#: Pillow, and the ``image`` worker is the one that already carries the fonts
+#: and the imaging code M4-02 put there.
+THUMBNAIL_GENERATE = TaskSpec("thumbnail.generate", "image")
+
+#: M5-03. Its own queue, declared in the DAG since M2 and finally consumed.
+#: Assembly is cheap but reads every asset in the project, so it is I/O-bound
+#: in a way the ``events`` queue's short tasks are not.
+PACKAGE_ASSEMBLE = TaskSpec("package.assemble", "package")
+
 #: Which task produces which artifact kind.
 #:
 #: Here rather than in the API because two callers need it and neither may own
@@ -97,6 +114,9 @@ STAGE_TASKS: dict[ArtifactKind, TaskSpec] = {
     ArtifactKind.VOICE: VOICE_GENERATE,
     ArtifactKind.TIMELINE: TIMELINE_COMPILE,
     ArtifactKind.RENDER: RENDER_GENERATE,
+    ArtifactKind.CAPTION: CAPTION_GENERATE,
+    ArtifactKind.THUMBNAIL: THUMBNAIL_GENERATE,
+    ArtifactKind.PACKAGE: PACKAGE_ASSEMBLE,
 }
 
 #: Series-scoped branding (M3-04b). On the ``image`` queue because it is image

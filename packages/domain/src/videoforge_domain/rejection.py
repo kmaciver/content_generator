@@ -30,11 +30,14 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from videoforge_shared.enums import ArtifactKind
+
 __all__ = [
     "CORRECTIONS",
     "Correction",
     "RejectionReason",
     "build_correction",
+    "reasons_for",
 ]
 
 
@@ -150,6 +153,39 @@ CORRECTIONS: dict[RejectionReason, Correction] = {
     ),
     # No entry for OTHER on purpose: the reviewer's own words are the guidance,
     # and inventing a generic sentence would dilute them.
+}
+
+
+def reasons_for(kind: ArtifactKind) -> tuple[RejectionReason, ...]:
+    """Which reasons a reviewer may pick for this kind of artifact.
+
+    **Every reason above describes a picture.** "Anatomy" and "Text in image"
+    are not things a narration, a script or a timeline can be wrong about, and
+    the review screen offered all nine on every rejectable artifact — so a
+    reviewer rejecting a voice take was asked to choose between failure modes
+    none of which could apply. A vocabulary that does not fit is worse than no
+    vocabulary: it gets answered with ``OTHER``, or worse, answered wrongly and
+    counted.
+
+    **Kinds without a grounded taxonomy get an empty tuple**, and their review
+    falls back to the free-text comment alone. That is deliberate, and it is
+    this module's own rule applied honestly: the image list exists because
+    those nine failures were *observed* between 2026-08-07 and 08-08. Nothing
+    has yet rejected a narration, so any voice vocabulary written today would
+    be guesswork — and a guessed category is one nobody picks correctly.
+
+    Voice is the obvious next candidate, and it needs two things first: real
+    rejections to draw the categories from, and somewhere for the resulting
+    correction to *go*. ``voice.generate`` currently consumes no correction, so
+    a structured reason would be recorded and change nothing.
+    """
+    return _REASONS_BY_KIND.get(kind, ())
+
+
+#: The one place the mapping lives. Image artifacts only, for now — see
+#: :func:`reasons_for`.
+_REASONS_BY_KIND: dict[ArtifactKind, tuple[RejectionReason, ...]] = {
+    ArtifactKind.IMAGE: tuple(RejectionReason),
 }
 
 

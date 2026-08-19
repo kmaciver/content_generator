@@ -31,10 +31,17 @@ const POLL_MS = 1500;
 export function ContactSheet({
   projectId,
   kind,
+  stageState,
   onOpenScene,
 }: {
   projectId: string;
   kind: string;
+  /** The *stage's* artifact state, from the project payload.
+   *
+   * Needed because a tile only knows about its own artifact, and for the first
+   * few seconds after Generate there are no per-scene artifacts at all — see
+   * the polling rule below. */
+  stageState: string | null;
   onOpenScene: (sceneId: string) => void;
 }) {
   const queryClient = useQueryClient();
@@ -45,7 +52,21 @@ export function ContactSheet({
   const sheet = useQuery({
     queryKey: ["contact-sheet", projectId, kind],
     queryFn: () => api.getContactSheet(projectId, kind),
+    // **Both conditions, and the second one is why this was broken.**
+    //
+    // Polling on tile state alone assumed a tile already had an artifact to
+    // report GENERATING. For the first seconds after Generate it does not:
+    // the fan-out lives inside one task, so every tile is an empty cell with
+    // `state: null` — nothing is generating as far as this query can see, the
+    // interval switches off, and the grid stays blank until the reviewer
+    // reloads the page. Exactly the M1-09a bug the single-item panel already
+    // carries a note about, one component over.
+    //
+    // The stage's own state does know: it is GENERATING from the moment the
+    // job is accepted. It also stops, so an ungenerated stage a reviewer is
+    // merely looking at does not poll forever.
     refetchInterval: (query) =>
+      stageState === "GENERATING" ||
       query.state.data?.tiles.some((t) => t.state === "GENERATING")
         ? POLL_MS
         : false,
@@ -159,7 +180,17 @@ export function ContactSheet({
         >
           {approveAll.isPending
             ? "Approving…"
-            : `Approve all remaining (${pending.length})`}
+            : // Counted from `pending`, not from `pending.length`: the batch
+              // also carries the set-level manifest version, which is a real
+              // approval and not a picture the reviewer is looking at. Showing
+              // 7 above a grid of 6 would read as a miscount.
+              //
+              // When only the manifest is left — every tile decided one at a
+              // time — the count is 0 and the button still has work to do, so
+              // it says what that work is rather than offering "(0)".
+              (sheet.data?.pending ?? 0) > 0
+              ? `Approve all remaining (${sheet.data?.pending})`
+              : "Approve the set"}
         </button>
         <span className="text-xs" style={{ color: "var(--color-ink-muted)" }}>
           ← → to move · a approve · r reject · g regenerate

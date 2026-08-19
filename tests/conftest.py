@@ -192,3 +192,32 @@ def db_session(db_engine: Engine) -> Iterator[Session]:
         session.close()
         transaction.rollback()
         connection.close()
+
+
+# --------------------------------------------------------------------------- #
+# Shared stage-harness fixtures (M5-01)
+# --------------------------------------------------------------------------- #
+#
+# Re-exported here rather than imported into each test module, and the reason
+# is mechanical: a test function taking ``sessions`` as a parameter *shadows* a
+# module-level ``sessions`` imported for the same purpose, which ruff reports as
+# F811 seventeen times over. Fixtures resolved through ``conftest`` need no
+# import at all, so the shadowing cannot arise.
+#
+# They still live in ``test_timeline_stage``, which owns them and keeps them
+# honest — this is a lookup path, not a second copy.
+from tests.test_timeline_stage import (  # noqa: E402
+    _fake_normalise,
+    _fake_storage,
+    branded_project,
+    ready,
+    sessions,
+)
+
+__all__ = [
+    "_fake_normalise",
+    "_fake_storage",
+    "branded_project",
+    "ready",
+    "sessions",
+]

@@ -47,7 +47,7 @@ from videoforge.services.admission import AdmissionError
 from videoforge.services.jobs import JobService
 from videoforge.services.review import ReviewService, StaleVersionError
 from videoforge_domain.artifact_lifecycle import IllegalTransitionError, capabilities
-from videoforge_shared.enums import ArtifactKind, ArtifactState
+from videoforge_shared.enums import ArtifactKind, ArtifactState, SubjectType
 from videoforge_shared.settings import AppSettings
 from videoforge_shared.tasks import STAGE_TASKS
 
@@ -122,6 +122,54 @@ def list_projects() -> tuple[Response, int]:
         projects = uow.projects.for_workspace(workspace.id, limit=limit, offset=offset)
         items = [ProjectSummary.of(p).model_dump(mode="json") for p in projects]
         return jsonify({"items": items}), 200
+
+
+@projects_blueprint.delete("/projects/<project_id>")
+def delete_project(project_id: str) -> tuple[Response, int]:
+    """Delete a project and everything hanging off it.
+
+    **Irreversible, and the only endpoint in this API that destroys anything.**
+    Every other write appends: a rejection is a row, a regeneration is a new
+    version, even releasing a stuck stage leaves the dead job in place. This
+    one removes rows, and the confirmation that guards it lives in the client
+    because that is where the person is — a second endpoint asking "are you
+    sure" would be a state machine for a decision made in one second.
+
+    204 with no body. There is nothing left to describe, and returning the
+    deleted project would invite a client to render something that no longer
+    exists.
+
+    What survives is deliberate and documented on ``ProjectRepository.delete``:
+    the audit trail (immutable by §10.3, and a deletion is exactly when "what
+    happened to that video?" gets asked) and the stored bytes (content-
+    addressed and shared between projects, so deleting them would break a
+    different video).
+    """
+    with transaction() as uow:
+        project = uow.projects.get(project_id)
+        if project is None:
+            raise ApiError(404, "Not found", f"no project {project_id}")
+
+        # The tombstone, written before the rows go. ``SubjectType`` has no
+        # bare ``PROJECT``; ``PROJECT_PHASE`` is the existing project-scoped
+        # subject and its ``subject_id`` is already a project id (see
+        # ``projection.refresh_project_state``). Reusing it beats an
+        # ``ALTER TYPE`` migration (§10.4) to improve one label — the
+        # ``event_type`` carries the meaning, and the subject only has to say
+        # what kind of id this is.
+        #
+        # This is the one write that must precede the delete rather than
+        # follow it: afterwards there is no topic left to record.
+        uow.audit.record_event(
+            event_type="project.deleted",
+            subject_type=SubjectType.PROJECT_PHASE,
+            subject_id=project_id,
+            payload={"topic": project.topic, "phase": project.phase},
+        )
+        uow.projects.delete(project)
+        uow.flush()
+
+    return Response(status=204), 204
 
 
 @projects_blueprint.get("/projects/<project_id>")
@@ -246,6 +294,36 @@ def _bucket_for(kind: ArtifactKind) -> str:
     if kind in (ArtifactKind.RENDER, ArtifactKind.PACKAGE):
         return str(settings.minio.bucket_artifacts)
     return str(settings.minio.bucket_assets)
+
+
+@projects_blueprint.post("/artifacts/<artifact_id>/release")
+def release_artifact(artifact_id: str) -> tuple[Response, int]:
+    """Free a stage whose job will never finish (M5-05).
+
+    **Keyed on the artifact, not the job**, because the artifact id is what the
+    UI has: ``StageSummary`` carries it and nothing in the client ever sees a
+    job id. An endpoint the screen cannot address is the shape this bug was
+    already in — ``JobService.cancel`` has existed since M1-04 with no route
+    reaching it, which is why a parked job needed psql.
+
+    409 rather than 404 when the stage is not generating: the request is
+    well-formed and the world is simply not in the state it describes, which is
+    the same distinction ``AdmissionError`` already carries.
+    """
+    with transaction() as uow:
+        artifact = uow.artifacts.get(artifact_id)
+        if artifact is None:
+            raise ApiError(404, "Not found", f"no artifact {artifact_id}")
+
+        if not JobService(uow, dispatcher()).release(artifact):
+            raise ApiError(
+                409,
+                "Not stuck",
+                f"{artifact.kind} is {artifact.state}, not generating; "
+                "there is no in-flight job to release",
+            )
+        uow.flush()
+        return _ok(ArtifactSummary.of(artifact))
 
 
 @projects_blueprint.get("/artifacts/<artifact_id>/versions/<int:version_no>")
@@ -402,12 +480,39 @@ def contact_sheet(project_id: str, kind: str) -> tuple[Response, int]:
                     pending.append(version.id)
             tiles.append(tile)
 
+        # The set-level artifact belongs in the batch, and its absence was a
+        # dead end (M4-12).
+        #
+        # A per-scene stage produces N picture artifacts **and** the
+        # project-wide row `JobService.request` created, which the worker
+        # completes with a manifest. Stage state is the *least advanced* of a
+        # kind, so leaving that row AWAITING_APPROVAL holds the whole stage
+        # there — and `by_scene` above filters it out, so it was neither a tile
+        # nor in this list. "Approve all remaining (6)" therefore approved six
+        # pictures, reported success, and left `image` unapproved with nothing
+        # on screen still pending: `timeline` could never be generated through
+        # the UI at all.
+        #
+        # Appended rather than turned into a tile: it has no picture, and a
+        # blank cell in a contact sheet is a scene that failed. It stays out of
+        # `pending`, which counts what a reviewer is *looking* at — hence the
+        # count being taken here, before the append, rather than from the list.
+        pending_tiles = len(pending)
+
+        manifest = uow.artifacts.find(project_id, artifact_kind, None)
+        if manifest is not None and capabilities(ArtifactState(manifest.state)).get(
+            "can_approve"
+        ):
+            manifest_version = uow.versions.latest(manifest.id)
+            if manifest_version is not None:
+                pending.append(manifest_version.id)
+
         return _ok(
             ContactSheet(
                 kind=artifact_kind.value,
                 tiles=tiles,
                 total=len(tiles),
-                pending=len(pending),
+                pending=pending_tiles,
                 pending_version_ids=pending,
             )
         )

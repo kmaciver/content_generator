@@ -57,7 +57,7 @@ unset.
 | Variable | Default | Notes |
 |---|---|---|
 | `BACKEND_PORT_HOST` | `5010` | **Not 5000.** macOS Control Center (AirPlay Receiver) holds `:5000` from Monterey onward, and `500x` tends to be crowded by other local projects. |
-| `POSTGRES_PORT_HOST` | `5432` | For `psql` / GUI clients. |
+| `POSTGRES_PORT_HOST` | `5432` | For `psql` / GUI clients. Published by **both** profiles — `production-local` binds it to `127.0.0.1` only (M5). |
 | `REDIS_PORT_HOST` | `6379` | For `redis-cli`. |
 | `MINIO_PORT_HOST` | `9000` | S3 API. |
 | `MINIO_CONSOLE_PORT_HOST` | `9001` | MinIO web console. |

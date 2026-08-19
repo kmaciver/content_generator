@@ -152,11 +152,26 @@ class TestDocument:
         assert "[Events]" in document
         assert "Dialogue:" not in document
 
-    def test_the_font_size_fits_a_phrase(self) -> None:
-        """M0-09's 110px was sized for a single word. At 1080 wide a
-        22-character phrase in bold needs roughly 70px, and a caption that
-        runs off the frame is the failure this guards."""
-        assert AssStyle().font_size <= 80
+    def test_the_font_size_is_derived_from_the_frame_width(self) -> None:
+        """**Regression.** A fixed 72px is right at 1080 and absurd at 320,
+        where it wrapped a three-word cue onto three lines — found by M4-10
+        rendering at a test resolution. libass sizes against ``PlayResX``, and
+        this writer is handed whatever the timeline says."""
+        style_line = [
+            line for line in _document().splitlines() if line.startswith("Style:")
+        ][0]
+        assert ",72," in style_line
+
+        small = ass_document(_CUES, width=320, height=568)
+        small_style = [
+            line for line in small.splitlines() if line.startswith("Style:")
+        ][0]
+        assert ",21," in small_style
+
+    def test_an_explicit_font_size_still_wins(self) -> None:
+        """The derivation is a default, not a policy: a series that wants
+        bigger captions must be able to say so."""
+        assert ",96," in _document(style=AssStyle(font_size=96))
 
     def test_narration_containing_an_override_is_neutralised(self) -> None:
         """End to end: the escape reaches the Dialogue line."""

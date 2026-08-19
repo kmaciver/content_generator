@@ -39,7 +39,7 @@ from videoforge_shared.enums import (
     SubjectType,
     TransitionCause,
 )
-from videoforge_shared.tasks import TaskSpec
+from videoforge_shared.tasks import STAGE_TASKS, TaskSpec
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +321,82 @@ class JobService:
         pending, self._pending = self._pending, []
         for spec, kwargs in pending:
             self._dispatcher.send(spec, **kwargs)
+
+    def release(self, artifact: Artifact, *, actor_id: str | None = None) -> bool:
+        """Free a stage whose job is never going to finish (M5-05).
+
+        **The failure this exists for, observed in M4.** A worker discarded a
+        queued message — in that case because its image had been rebuilt and no
+        longer registered the task name. The ``generation_job`` row stayed
+        ``QUEUED``, which is a *live* status, so it kept holding
+        ``uq_generation_job_live_idempotency_key``. That key is
+        ``task:artifact:v{next}``, derived from state the parked job never
+        advanced, so every retry produced the same key and deduplicated onto
+        the corpse. The stage could not be run again at all, and the only cure
+        was psql.
+
+        ``cancel`` already fixed half of that and nothing could reach it. This
+        is the whole move: kill the job, which releases the key, **and** let
+        the artifact out of ``GENERATING``, which it does not do on its own —
+        an artifact stuck generating still refuses a new job.
+
+        **``ORPHANED``, not ``GENERATION_FAILED``.** The domain has carried
+        that event since M1-02, described as "the reconciler's verdict on a job
+        whose worker vanished", and never invoked it. That is exactly this
+        verdict, made by hand instead of by a sweep — so the transition records
+        ``cause=reconciler``, and the reconciler proper (M6) will use this same
+        path rather than a second one. Lands in ``FAILED`` rather than back in
+        ``PENDING`` deliberately: the operator should see that something broke,
+        and ``FAILED`` is retryable.
+
+        Returns False when there is nothing to release, so the caller can say
+        "not stuck" rather than inventing a transition.
+        """
+        if ArtifactState(artifact.state) is not ArtifactState.GENERATING:
+            return False
+
+        uow = self._uow
+        # The *same* key `request` would compute, found through the same
+        # index — rather than a new "live job for this artifact" query, which
+        # would be a second definition of which job belongs to a stage.
+        spec = STAGE_TASKS.get(ArtifactKind(artifact.kind))
+        job = None
+        if spec is not None:
+            job = uow.jobs.live_by_idempotency_key(
+                idempotency_key(spec.name, artifact.id, artifact.current_version_no + 1)
+            )
+        if job is not None:
+            self.cancel(job.id, actor_id=actor_id)
+
+        transition = apply_event(ArtifactState(artifact.state), ArtifactEvent.ORPHANED)
+        artifact.state = transition.to_state
+        uow.audit.record_transition(
+            subject_type=SubjectType.ARTIFACT,
+            subject_id=artifact.id,
+            from_state=transition.from_state.value,
+            to_state=transition.to_state.value,
+            cause=transition.cause,
+            actor_id=actor_id,
+            job_id=job.id if job is not None else None,
+        )
+        uow.audit.record_event(
+            event_type="artifact.released",
+            subject_type=SubjectType.ARTIFACT,
+            subject_id=artifact.id,
+            actor_id=actor_id,
+        )
+        uow.flush()
+        refresh_project_state(uow, artifact.project_id)
+
+        logger.info(
+            "stage released",
+            extra={
+                "artifact_id": artifact.id,
+                "kind": artifact.kind,
+                "job_id": job.id if job is not None else None,
+            },
+        )
+        return True
 
     def cancel(self, job_id: str, *, actor_id: str | None = None) -> bool:
         """Cancel a job. Returns False when it is past cancelling.

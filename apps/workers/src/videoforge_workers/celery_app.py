@@ -98,6 +98,9 @@ app.conf.update(
         "videoforge_workers.voice",
         "videoforge_workers.timeline_stage",
         "videoforge_workers.render_stage",
+        "videoforge_workers.caption",
+        "videoforge_workers.thumbnail",
+        "videoforge_workers.package_stage",
     ),
     # ------------------------------------------------------------------ #
     # Beat

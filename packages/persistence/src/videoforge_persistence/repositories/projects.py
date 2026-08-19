@@ -107,6 +107,35 @@ class ProjectRepository(Repository):
         self.session.add(project)
         return project
 
+    def delete(self, project: VideoProject) -> None:
+        """Remove a project and everything the schema hangs off it.
+
+        **The FKs do the work, and they already reach everything that is
+        *about* this project**: artifacts → versions → comments, reviews,
+        scene sets → scenes, publishing packages; jobs → usage rows and their
+        transitions. All ``ON DELETE CASCADE``, verified against the live
+        schema rather than assumed.
+
+        Two things it deliberately does not take.
+
+        **The audit trail stays.** ``audit_event``, ``outbox_event`` and the
+        review-caused ``state_transition`` rows address their subject
+        polymorphically (``subject_type`` + ``subject_id``), so no FK reaches
+        them and nothing here goes looking. That is the right outcome, not an
+        oversight: §10.3 makes the trail immutable so "what happened to that
+        video?" stays answerable, and a deletion is the moment the question
+        gets asked. The rows are small and name a subject that no longer
+        exists, which is exactly what a tombstone is.
+
+        **The bytes stay.** Storage is content-addressed (ADR-004) and
+        deduplicated — ``put_bytes`` reports when a key already existed — so
+        two projects can and do share an object. Deleting this project's keys
+        would silently break another project's frames. Reclaiming them needs a
+        mark-and-sweep against every surviving version, which is its own job
+        and not a side effect of a click.
+        """
+        self.session.delete(project)
+
     def set_phase(self, project_id: str, phase: ProjectPhase) -> bool:
         """Write the derived phase cache (§12.4).
 
