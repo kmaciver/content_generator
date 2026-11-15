@@ -103,7 +103,19 @@ class ElevenLabsVoiceProvider:
                     "xi-api-key": self._api_key,
                     "Content-Type": "application/json",
                 },
-                json={"text": text, "model_id": req.model_hint or self._model},
+                json={
+                    "text": text,
+                    "model_id": req.model_hint or self._model,
+                    # Omitted entirely when unset rather than sent empty: the
+                    # API rejects an empty `language_code`, and "no opinion" is
+                    # a real position — it is what every deployment had before
+                    # this parameter existed.
+                    **(
+                        {"language_code": req.language_code}
+                        if req.language_code
+                        else {}
+                    ),
+                },
                 timeout=float(req.timeout_s),
             )
         except httpx.TimeoutException as exc:

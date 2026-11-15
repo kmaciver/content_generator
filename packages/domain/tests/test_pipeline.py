@@ -232,6 +232,61 @@ class TestShippedDeclaration:
         assert pipeline.stage_for(ArtifactKind.VOICE).parallelizable_per_scene is False
         assert pipeline.stage_for(ArtifactKind.IMAGE).parallelizable_per_scene is True
 
+    def test_only_the_stages_that_call_a_provider_bill(
+        self, pipeline: Pipeline
+    ) -> None:
+        """M5-07. The declaration, checked against what the workers actually do.
+
+        The flag exists because the obvious shortcut — infer cost from the
+        queue — is wrong in both directions on this very graph. ``thumbnail``
+        runs on the ``image`` queue and calls **nobody**: it composes an
+        already-approved scene image with typeset text (M5-02). ``caption``
+        shares the ``llm`` queue with four stages that do spend, and does spend
+        itself. So the two assertions below are the ones that would have caught
+        the shortcut, and they are why this is declared data rather than a set
+        literal somewhere in Python.
+
+        Getting it wrong in the ``True`` direction is the expensive mistake: a
+        free stage marked paid becomes unrunnable the moment the cap is hit,
+        which strands a finished video nobody can package or download.
+        """
+        billing = {s.produces.value for s in pipeline.stages if s.bills}
+
+        assert billing == {
+            "research",
+            "script",
+            "scene_set",
+            "prompt",
+            "image",
+            "voice",
+            "caption",
+        }
+        assert pipeline.stage_for(ArtifactKind.THUMBNAIL).bills is False
+        assert pipeline.stage_for(ArtifactKind.CAPTION).bills is True
+
+    def test_a_stage_that_omits_bills_is_free(self) -> None:
+        """The default is ``False`` on purpose, and it is the safe direction.
+
+        A new paid stage that forgets the flag gets a worse error message — the
+        cap still stops it at the provider call site, which is where the guard
+        actually lives. A new free stage wrongly marked paid would refuse to
+        finish a video already paid for. Cheap mistake versus expensive one.
+        """
+        pipeline = Pipeline.from_mapping(
+            {
+                "stages": [
+                    {
+                        "produces": "research",
+                        "requires": [],
+                        "queue": "llm",
+                        "phase_generating": "RESEARCHING",
+                        "phase_review": "RESEARCH_REVIEW",
+                    }
+                ]
+            }
+        )
+        assert pipeline.stage_for(ArtifactKind.RESEARCH).bills is False
+
     def test_approving_a_script_invalidates_all_media(self, pipeline: Pipeline) -> None:
         """The cascade M2-04 will walk, asserted on the real graph."""
         blast = pipeline.descendants(ArtifactKind.SCRIPT)

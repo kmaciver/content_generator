@@ -56,7 +56,13 @@ class TestRefs:
 
 class TestRendering:
     def test_the_split_separates_system_from_user(self) -> None:
-        result = render("script", topic="tides", target_seconds=50, research=None)
+        result = render(
+            "script",
+            topic="tides",
+            target_seconds=50,
+            research=None,
+            language="English",
+        )
         assert isinstance(result, RenderedPrompt)
         assert "You write short-form educational video scripts" in result.system
         assert "tides" in result.user
@@ -74,25 +80,44 @@ class TestRendering:
         the user asked for.
         """
         with pytest.raises(Exception, match="undefined|research"):
-            render("script", topic="tides", target_seconds=50)
+            # `language` supplied so the omission under test is `research`
+            # and nothing else — otherwise this would go green on the wrong
+            # missing variable and stop testing what it names.
+            render("script", topic="tides", target_seconds=50, language="English")
 
     def test_optional_sections_are_omitted_when_empty(self) -> None:
         """`research` is None until M2-09 wires the upstream stage in. The
         template must not ship a dangling "Research to work from:" header with
         nothing under it — the model treats that as an instruction to invent
         sources."""
-        result = render("script", topic="tides", target_seconds=50, research=None)
+        result = render(
+            "script",
+            topic="tides",
+            target_seconds=50,
+            research=None,
+            language="English",
+        )
         assert "Research to work from" not in result.user
 
     def test_a_provided_section_appears(self) -> None:
         result = render(
-            "script", topic="tides", target_seconds=50, research="The moon pulls."
+            "script",
+            topic="tides",
+            target_seconds=50,
+            research="The moon pulls.",
+            language="English",
         )
         assert "Research to work from" in result.user
         assert "The moon pulls." in result.user
 
     def test_the_rendered_ref_matches_the_template(self) -> None:
-        result = render("script", topic="tides", target_seconds=50, research=None)
+        result = render(
+            "script",
+            topic="tides",
+            target_seconds=50,
+            research=None,
+            language="English",
+        )
         assert result.ref == template_ref("script")
 
     def test_an_unknown_template_lists_the_real_ones(self) -> None:
@@ -136,6 +161,43 @@ class TestDiscovery:
         block half of the invariant silently covers nothing."""
         assert set(available()) >= prompts.BLOCK_TEMPLATES
 
+    def test_every_audience_facing_template_takes_a_language(self) -> None:
+        """A new template must not quietly default to English.
+
+        The failure this prevents is silent and expensive: a stage that forgets
+        the directive produces perfectly good English inside an otherwise
+        Portuguese video, and nothing downstream objects — the script parses,
+        the voice synthesises, the render succeeds, and the defect is only
+        visible to someone who watches the result.
+
+        ``StrictUndefined`` already forces the *caller* to pass a language once
+        the template asks for one. This is the other half: it forces the
+        template to ask.
+        """
+        for name in sorted(set(available()) - _LANGUAGE_EXEMPT):
+            source = prompts.TEMPLATES_DIR.glob(f"{name}.v*.jinja")
+            text = "".join(path.read_text(encoding="utf-8") for path in source)
+            assert "{{ language }}" in text, name
+
+    def test_the_image_prompt_is_deliberately_english(self) -> None:
+        """The exemption, pinned so it is not "fixed" later.
+
+        Image prompts go to a diffusion model, never to a person, and those
+        models are trained overwhelmingly on English captions — prompting them
+        in Portuguese measurably degrades what comes back. Both exempt
+        templates therefore stay English *and say so*, because the input they
+        receive (a visual brief, a narration) is in the video's language and a
+        model will otherwise mirror it.
+        """
+        for name in sorted(_LANGUAGE_EXEMPT):
+            text = "".join(
+                path.read_text(encoding="utf-8")
+                for path in prompts.TEMPLATES_DIR.glob(f"{name}.v*.jinja")
+            )
+            assert "{{ language }}" not in text, name
+        brief = (prompts.TEMPLATES_DIR / "prompt.v1.jinja").read_text(encoding="utf-8")
+        assert "Answer in English" in brief
+
     def test_the_shipped_directory_is_inside_the_package(self) -> None:
         """It has to be packaged, not merely present in the checkout: the
         container installs a wheel, and a templates directory left behind by
@@ -145,6 +207,15 @@ class TestDiscovery:
         assert list(prompts.TEMPLATES_DIR.glob("*.jinja"))
 
 
+#: Templates that stay English whatever the content language is.
+#:
+#: Both feed an image model rather than a person. Declared here rather
+#: than inferred from the absence of the variable, so that a template
+#: which *accidentally* loses its language directive fails the test above
+#: instead of silently joining this list.
+_LANGUAGE_EXEMPT = frozenset({"prompt", "image"})
+
+
 def _context_for(name: str) -> dict[str, object]:
     """Every variable each template needs. Deliberately explicit — a template
     that grows a variable should fail here until someone decides what the
@@ -152,18 +223,29 @@ def _context_for(name: str) -> dict[str, object]:
     # Annotated rather than inferred: without it mypy joins the entries'
     # differing value types down to `object` and the lookup stops type-checking.
     contexts: dict[str, dict[str, object]] = {
-        "script": {"topic": "tides", "target_seconds": 50, "research": None},
-        "research": {"topic": "tides", "target_seconds": 50},
+        "script": {
+            "topic": "tides",
+            "target_seconds": 50,
+            "research": None,
+            "language": "English",
+        },
+        "research": {
+            "topic": "tides",
+            "target_seconds": 50,
+            "language": "English",
+        },
         "caption": {
             "topic": "tides",
             "title": "Why the sea breathes",
             "script": "The moon pulls the water toward it.",
+            "language": "English",
         },
         "scenes": {
             "title": "Tides",
             "script": "The moon pulls.",
             "target_ms": 50_000,
             "tolerance_ms": 7_500,
+            "language": "English",
         },
         "prompt": {
             "index": 1,

@@ -255,6 +255,16 @@ class VoiceRequest(BaseModel):
     text: str
     voice_id: str = ""
     model_hint: str = ""
+    #: ISO-639-1, passed to the provider to *enforce* the language rather than
+    #: let it be inferred from the text.
+    #:
+    #: Inference is usually right and expensively wrong when it is not: a
+    #: Portuguese script containing an English proper noun can flip the model's
+    #: guess, and the failure is a narration read with an English accent — not
+    #: an error, just a video nobody in the target audience wants to watch.
+    #: Empty means "let the provider decide", which is the right default for a
+    #: provider that has no such parameter.
+    language_code: str = ""
     #: Generous: a full narration is far more audio than a single image, and
     #: SADD §14.2 puts the voice queue's ceiling well above this.
     timeout_s: int = 300

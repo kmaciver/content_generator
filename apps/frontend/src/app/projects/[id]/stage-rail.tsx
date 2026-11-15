@@ -90,6 +90,19 @@ export function StageRail({
               >
                 Waiting on: {stage.unmet.map(humanise).join(", ")}
               </span>
+            ) : stage.blocked_reason ? (
+              // Not a missing input, so not "Waiting on" — nothing upstream
+              // will ever satisfy it. The server composes the sentence (M5-07)
+              // because it carries the numbers; rendering "Blocked" here and
+              // making the reader hunt for the figure would be the disabled
+              // button with extra steps.
+              <span
+                data-testid={`stage-blocked-${stage.kind}`}
+                className="text-xs"
+                style={{ color: "var(--color-state-failed)" }}
+              >
+                {stage.blocked_reason}
+              </span>
             ) : (
               <button
                 type="button"

@@ -40,6 +40,7 @@ from videoforge_shared.tasks import VOICE_GENERATE
 from videoforge_workers.skeleton import JobContext, videoforge_task
 from videoforge_workers.stages import (
     complete_stored_generation,
+    content_language,
     load_artifact,
     require_budget,
 )
@@ -68,7 +69,16 @@ def voice_body(ctx: JobContext) -> None:
     require_budget(ctx)
     settings = load_worker_settings()
     result = _provider().synthesise(
-        VoiceRequest(text=script, voice_id=settings.providers.voice.voice_id)
+        VoiceRequest(
+            text=script,
+            voice_id=settings.providers.voice.voice_id,
+            # The *voice* still has to be one that speaks this language —
+            # `language_code` tells the model which language the text is, not
+            # which accent to fake. A Brazilian narration needs a Brazilian
+            # voice id in PROVIDERS__VOICE__VOICE_ID; this only stops the model
+            # guessing wrong about the text it was handed.
+            language_code=content_language().voice_code,
+        )
     )
 
     # Written alignment, never normalised. §1.0.2 found the reference captions

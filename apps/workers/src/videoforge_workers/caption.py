@@ -34,6 +34,7 @@ from videoforge_shared.tasks import CAPTION_GENERATE
 from videoforge_workers.skeleton import JobContext, videoforge_task
 from videoforge_workers.stages import (
     complete_generation,
+    content_language,
     llm_complete,
     load_artifact,
     require_approved_content,
@@ -79,7 +80,16 @@ _RESPONSE_SCHEMA = {
 #: What survives in a hashtag. Instagram allows letters, digits and underscore;
 #: everything else silently ends the tag, so ``#dental-care`` is really
 #: ``#dental``. Stripped here so the stored tag is the tag that will exist.
-_TAG_ALLOWED = re.compile(r"[^a-z0-9_]")
+#:
+#: **Unicode letters, not ASCII.** This was ``[^a-z0-9_]``, which silently
+#: turned ``#educação`` into ``#educao`` and ``#saúde`` into ``#sade`` — not a
+#: different tag but a *misspelling*, published under a hashtag nobody in
+#: Brazil searches for. Instagram supports accented tags and treats them as
+#: distinct from their unaccented forms, so stripping the accent does not even
+#: fall back to a broader tag; it invents an empty one. Python's ``\w`` is
+#: Unicode-aware for ``str`` patterns, so this now keeps letters in any script
+#: and still drops the punctuation that really does end a tag.
+_TAG_ALLOWED = re.compile(r"\W", re.UNICODE)
 
 
 def caption_body(ctx: JobContext) -> None:
@@ -99,6 +109,7 @@ def caption_body(ctx: JobContext) -> None:
         topic=project.topic,
         title=script.get("title") or "",
         script=str(script.get("script") or ""),
+        language=content_language().name,
     )
     result = llm_complete(ctx, prompt, _RESPONSE_SCHEMA)
 

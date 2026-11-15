@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api } from "@/lib/api";
+import { api, type ProjectSummary, type WaitingOn } from "@/lib/api";
 import { humanise } from "@/lib/state-colors";
 
 export function ProjectList() {
@@ -19,6 +19,14 @@ export function ProjectList() {
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: api.listProjects,
+    // The list used to be static: a project could finish generating while
+    // someone watched it and the row never changed. Polls only while a worker
+    // is actually running, which is the same rule the review screen uses and
+    // the only time this page has anything new to say.
+    refetchInterval: (query) =>
+      query.state.data?.items.some((p) => p.waiting_on === "machine")
+        ? 3000
+        : false,
   });
 
   // The series is not decoration. ADR-016 makes an approved character and
@@ -129,83 +137,170 @@ export function ProjectList() {
           No projects yet. Enter a topic above to start one.
         </p>
       ) : (
-        <ul className="flex flex-col gap-2">
-          {projects.data.items.map((project) => {
-            const confirming = pendingDelete === project.id;
+        // **Grouped by who is blocked, not listed by recency.** A flat list
+        // answers "what exists"; the question someone actually opens this app
+        // with is "what needs me". The order of the groups is that question's
+        // answer, and it is why `waiting_on` is derived on the server — the
+        // phase string cannot tell "a worker has this" from "nobody has
+        // started it", so grouping on it here would file the one project
+        // needing attention under Working.
+        <div className="flex flex-col gap-6">
+          {GROUPS.map(({ key, title, hint }) => {
+            const items = projects.data.items.filter(
+              (project) => project.waiting_on === key,
+            );
+            // Empty groups are omitted rather than shown empty: three headings
+            // over two projects is a filing cabinet, not a dashboard.
+            if (items.length === 0) {
+              return null;
+            }
             return (
-              <li
-                key={project.id}
-                className="flex items-center gap-2 rounded-md px-4 py-3 text-sm"
-                style={{
-                  background: "var(--color-surface-raised)",
-                  border: `1px solid ${
-                    confirming
-                      ? "var(--color-state-failed)"
-                      : "var(--color-border-subtle)"
-                  }`,
-                }}
+              <section
+                key={key}
+                data-testid={`group-${key}`}
+                className="flex flex-col gap-2"
               >
-                {/* The link no longer wraps the row: a delete control inside
-                    an anchor is a click target inside a click target, and the
-                    one time it mis-fires it navigates instead of deleting —
-                    or worse, the other way round. */}
-                <Link
-                  href={`/projects/${project.id}`}
-                  className="flex flex-1 items-center justify-between gap-4"
+                <h2
+                  className="text-xs font-medium uppercase tracking-wide"
+                  style={{ color: "var(--color-ink-muted)" }}
                 >
-                  <span>{project.title ?? project.topic}</span>
-                  <span style={{ color: "var(--color-ink-muted)" }}>
-                    {humanise(project.phase)}
+                  {title}{" "}
+                  <span style={{ opacity: 0.7 }}>
+                    {items.length} · {hint}
                   </span>
-                </Link>
-
-                {/* **Two steps, not a `confirm()` dialog.** This is the only
-                    irreversible action in the app — it takes the artifacts,
-                    versions, scenes and packages with it — so it should not be
-                    one click. An inline second press keeps the project's name
-                    on screen while you decide, which a modal covers up, and it
-                    is reachable by keyboard without trapping focus. */}
-                {confirming ? (
-                  <>
-                    <button
-                      type="button"
-                      data-testid={`confirm-delete-${project.id}`}
-                      disabled={remove.isPending}
-                      onClick={() => remove.mutate(project.id)}
-                      className="rounded px-2 py-1 text-xs disabled:opacity-40"
-                      style={{
-                        border: "1px solid var(--color-state-failed)",
-                        color: "var(--color-state-failed)",
-                      }}
-                    >
-                      {remove.isPending ? "Deleting…" : "Delete for good"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPendingDelete(null)}
-                      className="rounded px-2 py-1 text-xs"
-                      style={{ color: "var(--color-ink-muted)" }}
-                    >
-                      Cancel
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    aria-label={`Delete ${project.title ?? project.topic}`}
-                    data-testid={`delete-${project.id}`}
-                    onClick={() => setPendingDelete(project.id)}
-                    className="rounded px-2 py-1 text-xs"
-                    style={{ color: "var(--color-ink-muted)" }}
-                  >
-                    Delete
-                  </button>
-                )}
-              </li>
+                </h2>
+                <ul className="flex flex-col gap-2">
+                  {items.map((project) => (
+                    <ProjectRow
+                      key={project.id}
+                      project={project}
+                      confirming={pendingDelete === project.id}
+                      deleting={remove.isPending}
+                      onArm={() => setPendingDelete(project.id)}
+                      onDisarm={() => setPendingDelete(null)}
+                      onDelete={() => remove.mutate(project.id)}
+                    />
+                  ))}
+                </ul>
+              </section>
             );
           })}
-        </ul>
+        </div>
       )}
     </div>
+  );
+}
+
+/** The dashboard's three buckets, in the order someone scans them.
+ *
+ * "Waiting on you" first and always: it is the only group a person can act on,
+ * and burying it under a longer list of things that are already moving is how
+ * a review queue silently grows.
+ */
+const GROUPS: { key: WaitingOn; title: string; hint: string }[] = [
+  { key: "human", title: "Waiting on you", hint: "approve, retry or generate" },
+  { key: "machine", title: "Working", hint: "a worker has it" },
+  { key: "nobody", title: "Done", hint: "package ready" },
+];
+
+function ProjectRow({
+  project,
+  confirming,
+  deleting,
+  onArm,
+  onDisarm,
+  onDelete,
+}: {
+  project: ProjectSummary;
+  confirming: boolean;
+  deleting: boolean;
+  onArm: () => void;
+  onDisarm: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <li
+      data-testid={`project-row-${project.id}`}
+      className="flex items-center gap-2 rounded-md px-4 py-3 text-sm"
+      style={{
+        background: "var(--color-surface-raised)",
+        border: `1px solid ${
+          confirming
+            ? "var(--color-state-failed)"
+            : "var(--color-border-subtle)"
+        }`,
+      }}
+    >
+      {/* The link no longer wraps the row: a delete control inside an anchor
+          is a click target inside a click target, and the one time it
+          mis-fires it navigates instead of deleting — or worse, the other way
+          round. */}
+      <Link
+        href={`/projects/${project.id}`}
+        className="flex flex-1 items-center justify-between gap-4"
+      >
+        <span>{project.title ?? project.topic}</span>
+        <span className="flex items-center gap-3">
+          {/* §12.4's HAS_FAILURES, orthogonal to the phase and invisible until
+              now. A failed image among twenty does not move the phase — the
+              other nineteen are fine — so a broken project sat in this list
+              looking exactly like a healthy one. */}
+          {project.has_failures ? (
+            <span
+              data-testid={`project-failed-${project.id}`}
+              style={{ color: "var(--color-state-failed)" }}
+            >
+              Needs attention
+            </span>
+          ) : null}
+          <span style={{ color: "var(--color-ink-muted)" }}>
+            {humanise(project.phase)}
+          </span>
+        </span>
+      </Link>
+
+      {/* **Two steps, not a `confirm()` dialog.** This is the only
+          irreversible action in the app — it takes the artifacts, versions,
+          scenes and packages with it — so it should not be one click. An
+          inline second press keeps the project's name on screen while you
+          decide, which a modal covers up, and it is reachable by keyboard
+          without trapping focus. */}
+      {confirming ? (
+        <>
+          <button
+            type="button"
+            data-testid={`confirm-delete-${project.id}`}
+            disabled={deleting}
+            onClick={onDelete}
+            className="rounded px-2 py-1 text-xs disabled:opacity-40"
+            style={{
+              border: "1px solid var(--color-state-failed)",
+              color: "var(--color-state-failed)",
+            }}
+          >
+            {deleting ? "Deleting…" : "Delete for good"}
+          </button>
+          <button
+            type="button"
+            onClick={onDisarm}
+            className="rounded px-2 py-1 text-xs"
+            style={{ color: "var(--color-ink-muted)" }}
+          >
+            Cancel
+          </button>
+        </>
+      ) : (
+        <button
+          type="button"
+          aria-label={`Delete ${project.title ?? project.topic}`}
+          data-testid={`delete-${project.id}`}
+          onClick={onArm}
+          className="rounded px-2 py-1 text-xs"
+          style={{ color: "var(--color-ink-muted)" }}
+        >
+          Delete
+        </button>
+      )}
+    </li>
   );
 }

@@ -57,6 +57,12 @@ x-app-env: &app-env
   # published in USD, so changing this without changing them relabels
   # estimates and makes them wrong.
   COST_CURRENCY: "${COST_CURRENCY:-USD}"
+  # The language the *content* is written and spoken in (BCP-47).
+  #
+  # In the shared block rather than the provider one: the backend records
+  # it on every generated version, and it is not a secret — it is the
+  # single most visible property of the output.
+  CONTENT_LANGUAGE: "${CONTENT_LANGUAGE:-en}"
 
 # Provider credentials and selection. Referenced ONLY by the provider-calling
 # workers. Splitting this out is what makes the blast-radius rule mechanically

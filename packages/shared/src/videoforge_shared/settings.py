@@ -119,6 +119,18 @@ class CoreSettings(BaseSettings):
     #: number meant their card statement. It does not, and no name ending in
     #: ``_usd`` can say so.
     daily_cost_limit: Decimal = Decimal("10.00")
+    #: BCP-47 tag for the language the **content** is written and spoken in —
+    #: research, script, scene narration, burned-in captions, Instagram copy.
+    #:
+    #: Not the interface language: the app's own UI is English either way.
+    #: Not the image prompts either, which stay English on purpose because
+    #: diffusion models are trained on English captions — see
+    #: ``videoforge_shared.language`` for that argument in full.
+    #:
+    #: Held as a string and resolved through ``language.resolve`` at the point
+    #: of use, so a malformed tag fails with a message about tags rather than
+    #: with a Pydantic validation error about a custom type.
+    content_language: str = "en"
     #: What the limit above, and every ``Usage.unit_cost_estimate``, are
     #: denominated in.
     #:

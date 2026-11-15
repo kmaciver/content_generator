@@ -39,12 +39,37 @@ test("topic → research → script → reject → regenerate → edit → appro
 
   const projectLink = page.getByRole("link", { name: TOPIC });
   await expect(projectLink).toBeVisible();
+
+  // The dashboard files it by who is blocked (M5-08). A brand-new project has
+  // no artifacts and no worker running, so the only thing that can move it is
+  // a person — and that is the group a person opens this app to read.
+  //
+  // Asserted as "this project is inside that group", not "no other group
+  // exists": the database carries every earlier run's projects, so a bare
+  // count would be a assertion about test history rather than about grouping.
+  await expect(
+    page.getByTestId("group-human").getByRole("link", { name: TOPIC }),
+  ).toBeVisible();
+
   await projectLink.click();
 
   await expect(page.getByRole("heading", { name: TOPIC })).toBeVisible();
   // A project with no artifacts is a DRAFT, and the phase is derived (§12.4) —
   // this is the first assertion that the DAG reached the browser.
   await expect(page.getByTestId("project-phase")).toHaveText("Draft");
+
+  // --- the spend cap is visible before a penny is spent (M5-07) ------------
+  // The cap (S10) has guarded the provider call site since M3-11 from a number
+  // no screen had ever shown, so the first sign of it was a stage failing for
+  // a reason that read like a vendor outage. Asserted on a fresh project, where
+  // both figures are zero: the point is that the meter is *there* before it
+  // matters, not that it counts. Exhaustion is pinned in the API tests, which
+  // can spend without a provider.
+  const budget = page.getByTestId("budget");
+  await expect(budget).toBeVisible();
+  await expect(budget).toContainText("USD");
+  // Nothing is blocked on a fresh day, so no stage carries a cap reason.
+  await expect(page.getByTestId("stage-blocked-research")).toHaveCount(0);
 
   // --- script is blocked until research is approved -------------------------
   // The pipeline's shape, visible. Before M2-13 the UI offered "Generate
@@ -62,6 +87,21 @@ test("topic → research → script → reject → regenerate → edit → appro
   // over a real broker, provider called, version written, artifact transitioned.
   await expect(approve).toBeEnabled({ timeout: 60_000 });
   await expect(page.getByTestId("project-phase")).toHaveText("Research Review");
+
+  // --- the job that did it (M5-06) -----------------------------------------
+  // Asserted on a *succeeded* job rather than a running one, and deliberately:
+  // the mock provider finishes in a couple of hundred milliseconds, so catching
+  // RUNNING would be a race the suite loses at random. This is the assertion
+  // that survives — the panel exists, names the queue the work ran on, and
+  // reports an outcome, which is exactly what was missing when a real render
+  // failure had to be diagnosed from a container log.
+  const job = page.getByTestId("job-status");
+  await expect(job).toBeVisible();
+  await expect(page.getByTestId("job-state")).toHaveText("Succeeded");
+  await expect(job).toContainText("llm");
+  // No error, so no Retry: the button belongs to the failure and appearing
+  // beside a healthy stage would offer a cure for nothing.
+  await expect(page.getByTestId("retry-stage")).toHaveCount(0);
 
   await approve.click();
   await expect(page.getByTestId("stage-state-research")).toHaveText("Approved");

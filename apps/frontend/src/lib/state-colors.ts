@@ -25,6 +25,29 @@ const VERSION_STATUS_TOKENS: Record<VersionStatus, string> = {
   SUPERSEDED: "var(--color-ink-muted)",
 };
 
+// Job *execution* status, which is a different vocabulary from artifact state
+// and deliberately so (SADD §12.3): a job succeeding is a cause of an artifact
+// transition, never the transition itself. Two maps rather than one shared
+// lookup, because the two enums overlap on `FAILED` and on nothing else — and
+// merging them would quietly make "the job failed" and "the stage failed" the
+// same fact, which is exactly what the release path (M5-05) exists to unpick.
+const JOB_STATUS_TOKENS: Record<string, string> = {
+  QUEUED: "var(--color-state-pending)",
+  RUNNING: "var(--color-state-generating)",
+  SUCCEEDED: "var(--color-state-ok)",
+  FAILED: "var(--color-state-failed)",
+  // Ended without finishing, but nothing went wrong — someone pressed
+  // Release, or the reconciler gave up on a worker that vanished. Muted for
+  // the same reason SUPERSEDED is: colouring them red would report an
+  // operator's own deliberate action back to them as a fault.
+  CANCELLED: "var(--color-ink-muted)",
+  ORPHANED: "var(--color-ink-muted)",
+};
+
+export function jobStatusColor(status: string): string {
+  return JOB_STATUS_TOKENS[status] ?? "var(--color-ink-muted)";
+}
+
 export function artifactStateColor(state: string): string {
   return ARTIFACT_STATE_TOKENS[state] ?? "var(--color-ink-muted)";
 }

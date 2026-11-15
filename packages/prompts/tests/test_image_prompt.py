@@ -250,7 +250,13 @@ class TestRenderBlock:
         tolerated a missing user section would let a model answer a system
         prompt on its own."""
         with pytest.raises(ValueError, match="render_block"):
-            render_block("script", topic="t", target_seconds=50, research="r")
+            render_block(
+                "script",
+                topic="t",
+                target_seconds=50,
+                research="r",
+                language="English",
+            )
 
     def test_render_rejects_a_block_template(self) -> None:
         with pytest.raises(ValueError, match="no user section"):

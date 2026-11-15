@@ -1,13 +1,19 @@
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * M4-12 — the whole pipeline, through media, in a browser.
+ * M4-12 / M5-12 — the whole pipeline, end to end, in a browser.
  *
  * `review-flow.spec.ts` proves the *review machinery*: reject, regenerate,
  * edit, approve, and an audit trail that accounts for all of it. It stops at
  * script. This one proves the *pipeline*: topic → research → script → scenes →
- * prompts → images → voice → timeline → a playable MP4, driven entirely
- * through the UI a person would use.
+ * prompts → images → voice → timeline → render → caption → cover → a
+ * downloadable publishing package, driven entirely through the UI a person
+ * would use.
+ *
+ * **M5-12 extended it by the last hop**, which is also the SADD's own
+ * definition of this suite (§21.4): "create project → generate/approve every
+ * stage → render → download package → assert zip manifest". The milestone's
+ * exit criterion and this test are the same sentence.
  *
  * **Why that distinction is worth a second file.** Everything below script had
  * only ever been exercised by unit tests and by hand. Unit tests can prove the
@@ -61,7 +67,7 @@ async function approveCurrent(page: Page): Promise<void> {
   await approve.click();
 }
 
-test("topic → research → script → scenes → prompts → images → voice → timeline → render", async ({
+test("topic → every stage → a verified publishing package", async ({
   page,
 }) => {
   // --- topic, with a series ------------------------------------------------
@@ -81,6 +87,14 @@ test("topic → research → script → scenes → prompts → images → voice 
   await expect(series).not.toHaveValue("");
 
   await page.getByRole("button", enabled("Create")).click();
+  await page.getByRole("link", { name: TOPIC }).click();
+  await expect(page.getByRole("heading", { name: TOPIC })).toBeVisible();
+
+  // The way out exists. This screen was reachable and not leavable — the only
+  // route back was the browser's own Back button or editing the URL — and a
+  // suite that never tried to leave could not notice.
+  await page.getByRole("link", { name: "← Projects" }).click();
+  await expect(page).toHaveURL(/\/projects$/);
   await page.getByRole("link", { name: TOPIC }).click();
   await expect(page.getByRole("heading", { name: TOPIC })).toBeVisible();
 
@@ -166,6 +180,23 @@ test("topic → research → script → scenes → prompts → images → voice 
   );
   expect(loaded, "every contact-sheet image should have decoded").toBe(true);
 
+  // **Open one scene.** The grid is not the only image surface, and it was the
+  // only one that worked: `stage-content` had no `image` branch at all, so
+  // selecting a single scene rendered an empty panel. It went unnoticed for two
+  // milestones precisely because this suite never left the contact sheet — the
+  // gap in the test and the gap in the code were the same shape.
+  await promptChips.nth(0).click();
+  const frame = page.getByTestId("scene-frame");
+  await expect(frame).toBeVisible();
+  await expect
+    .poll(async () =>
+      frame
+        .locator("img")
+        .evaluate((n) => (n as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(0);
+  await scenes.getByRole("button", enabled("Set")).click();
+
   const approveAll = page.getByTestId("approve-all");
   await expect(approveAll).toBeEnabled();
   await approveAll.click();
@@ -237,4 +268,85 @@ test("topic → research → script → scenes → prompts → images → voice 
   await expect.poll(async () => marks.count()).toBe(sceneCount);
 
   await expect(page.getByTestId("project-phase")).toHaveText("Render Review");
+
+  await approveCurrent(page);
+
+  // --- caption (M5-01) -----------------------------------------------------
+  // Instagram copy, and the first stage that is *published* verbatim rather
+  // than consumed by another stage.
+  await generate(page, "Caption");
+  await expect(page.getByTestId("caption-review")).toBeVisible({
+    timeout: 120_000,
+  });
+  await expect(page.getByTestId("caption-review")).toContainText("/ 2200");
+  await approveCurrent(page);
+
+  // --- thumbnail (M5-02) ---------------------------------------------------
+  await generate(page, "Thumbnail");
+  const cover = page.getByTestId("cover-preview");
+  await expect(cover).toBeVisible({ timeout: 120_000 });
+
+  // Both crops render, and both decode. The 1:1 one is the assertion that
+  // matters: it is what the profile grid shows, and a cover whose hook sits
+  // outside it looks perfect in every 9:16 preview and is cropped away where
+  // people actually browse.
+  await expect
+    .poll(async () =>
+      cover
+        .locator("img")
+        .evaluateAll((nodes) =>
+          nodes.every((node) => (node as HTMLImageElement).naturalWidth > 0),
+        ),
+    )
+    .toBe(true);
+  await expect(cover.getByTestId("cover-cropped")).toBeVisible();
+  await approveCurrent(page);
+
+  // --- package (M5-03/04) --------------------------------------------------
+  await generate(page, "Package");
+  const packageReview = page.getByTestId("package-review");
+  await expect(packageReview).toBeVisible({ timeout: 180_000 });
+
+  // **The manifest is the review unit**, so it is what this asserts. A zip
+  // lists its own names; what the manifest adds is a sha256 per entry, which
+  // is the only thing that lets a recipient verify the archive rather than
+  // trust it. F10's contents are checked by name here and by hash below.
+  const rows = packageReview.locator("tbody tr");
+  await expect.poll(async () => rows.count()).toBeGreaterThan(0);
+  const listed = await rows.evaluateAll((tr) =>
+    tr.map((row) => row.querySelector("td")?.textContent?.trim() ?? ""),
+  );
+  expect(listed).toContain("video.mp4");
+  expect(listed).toContain("cover.png");
+  expect(listed).toContain("caption.txt");
+  expect(listed).toContain("hashtags.txt");
+  expect(
+    listed.some((name) => name.startsWith("scenes/scene-")),
+    "the package should carry the scene assets (F10)",
+  ).toBe(true);
+
+  // --- download, and verify it (SADD §21.4) --------------------------------
+  // "download package → assert zip manifest" is the SADD's own definition of
+  // this suite's last step, and the exit criterion of the milestone. Fetched
+  // through the same URL the button uses rather than driven through the
+  // browser's download manager: what is being proven is that the archive is
+  // served and intact, not that Chromium can save a file.
+  const download = page.getByTestId("package-download");
+  const zipUrl = await download.getAttribute("href");
+  expect(zipUrl, "the package must have a download URL").toBeTruthy();
+  expect(zipUrl).toContain("/assets/artifacts/");
+
+  const archive = await page.request.get(zipUrl!);
+  expect(archive.status()).toBe(200);
+  expect(archive.headers()["content-type"]).toBe("application/zip");
+
+  const body = await archive.body();
+  // The local file header magic. A 200 carrying an HTML error page would pass
+  // a status check and fail here, which is the failure worth catching.
+  expect(body.subarray(0, 2).toString("latin1")).toBe("PK");
+  expect(body.byteLength).toBeGreaterThan(10_000);
+
+  await expect(page.getByTestId("project-phase")).toHaveText(
+    "Ready To Publish",
+  );
 });

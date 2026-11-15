@@ -17,6 +17,14 @@
 #     rather than by never appearing in the UI.
 #   * the graph must be acyclic.
 #
+# `bills: true` marks a stage that calls a paid provider (M5-07). It is what
+# lets the API refuse a Generate the daily cap would reject anyway, instead of
+# queueing a job that dies in a worker — and what keeps `render`, `timeline`,
+# `thumbnail` and `package` runnable once the cap is hit, since finishing a
+# video already paid for must never be blocked by a spend limit. Declared, not
+# inferred from `queue`: `thumbnail` runs on the `image` queue and calls
+# nobody. The cap itself is still enforced at the provider call site.
+#
 # `requires` means "these artifact kinds must be APPROVED in this project".
 # An empty list makes a stage a root — it needs only the project's topic.
 
@@ -24,24 +32,28 @@ stages:
   - produces: research
     requires: []
     queue: llm
+    bills: true
     phase_generating: RESEARCHING
     phase_review: RESEARCH_REVIEW
 
   - produces: script
     requires: [research]
     queue: llm
+    bills: true
     phase_generating: SCRIPTING
     phase_review: SCRIPT_REVIEW
 
   - produces: scene_set
     requires: [script]
     queue: llm
+    bills: true
     phase_generating: SCENING
     phase_review: SCENES_REVIEW
 
   - produces: prompt
     requires: [scene_set]
     queue: llm
+    bills: true
     # One job, N prompt artifacts — the fan-out is inside the task (§13).
     parallelizable_per_scene: true
     phase_generating: SCENING
@@ -53,6 +65,7 @@ stages:
   - produces: image
     requires: [prompt]
     queue: image
+    bills: true
     parallelizable_per_scene: true
     phase_generating: MEDIA_GENERATION
     phase_review: MEDIA_REVIEW
@@ -64,6 +77,7 @@ stages:
   - produces: voice
     requires: [scene_set]
     queue: voice
+    bills: true
     phase_generating: MEDIA_GENERATION
     phase_review: MEDIA_REVIEW
 
@@ -102,6 +116,7 @@ stages:
   - produces: caption
     requires: [render]
     queue: llm
+    bills: true
     phase_generating: PACKAGING
     phase_review: PACKAGING
 

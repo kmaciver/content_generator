@@ -2,16 +2,38 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import sqlalchemy as sa
 
-from videoforge_persistence.models import Series, VideoProject, Workspace
+from videoforge_persistence.models import Artifact, Series, VideoProject, Workspace
 from videoforge_persistence.repositories.base import Repository, affected_rows
-from videoforge_shared.enums import ProjectPhase
+from videoforge_shared.enums import ArtifactState, ProjectPhase
 from videoforge_shared.ids import new_ulid
 
-__all__ = ["ProjectRepository", "SeriesRepository", "WorkspaceRepository"]
+__all__ = [
+    "ProjectActivity",
+    "ProjectRepository",
+    "SeriesRepository",
+    "WorkspaceRepository",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectActivity:
+    """What a project's artifacts are doing, without loading them (M5-08).
+
+    Two booleans, because two booleans is all the dashboard needs: who the
+    project waits on, and whether anything under it has failed.
+    """
+
+    generating: bool
+    failed: bool
+
+
+#: What a project with no artifacts at all is doing: nothing.
+IDLE = ProjectActivity(generating=False, failed=False)
 
 
 class WorkspaceRepository(Repository):
@@ -85,6 +107,46 @@ class ProjectRepository(Repository):
                 .offset(offset)
             )
         )
+
+    def activity_for(self, project_ids: list[str]) -> dict[str, ProjectActivity]:
+        """One grouped scan for a whole page of projects (M5-08).
+
+        The dashboard needs to know, per project, whether a worker is running
+        and whether anything failed. Reading it from the ``phase`` column is
+        not an option — ``derive_phase`` reports a stage's *generating* phase
+        both when it is running and when it has produced nothing yet, so the
+        column cannot distinguish "a machine has this" from "nobody has
+        started it" (see ``videoforge_domain.phases.waiting_on``). Only the
+        artifact states can, and the honest way to get them for fifty projects
+        is not fifty queries.
+
+        ``FAILED`` is the other half, and it is invisible today for a specific
+        reason: a failed image among twenty does **not** move the phase
+        (§12.4's ``HAS_FAILURES`` is deliberately orthogonal, since the other
+        nineteen are fine), so a project can sit on the list looking healthy
+        with a broken scene inside it. This is the query that surfaces it.
+
+        Served by ``ix_artifact_project_id_state``. Projects with no artifacts
+        return no row at all, which is why callers default to ``IDLE`` rather
+        than expecting a key.
+        """
+        if not project_ids:
+            return {}
+        rows = self.session.execute(
+            sa.select(
+                Artifact.project_id,
+                sa.func.bool_or(Artifact.state == ArtifactState.GENERATING),
+                sa.func.bool_or(Artifact.state == ArtifactState.FAILED),
+            )
+            .where(Artifact.project_id.in_(project_ids))
+            .group_by(Artifact.project_id)
+        ).all()
+        return {
+            project_id: ProjectActivity(
+                generating=bool(generating), failed=bool(failed)
+            )
+            for project_id, generating, failed in rows
+        }
 
     def create(
         self,

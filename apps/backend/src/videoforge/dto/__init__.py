@@ -16,12 +16,15 @@ the rules (§11).
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from videoforge_domain.artifact_lifecycle import can_regenerate, capabilities
+from videoforge_domain.budget import remaining_budget
 from videoforge_domain.captions import group_into_cues
+from videoforge_domain.phases import WaitingOn, waiting_on
 from videoforge_domain.rejection import RejectionReason, reasons_for
 from videoforge_domain.timing import WordTiming
 from videoforge_persistence.models import (
@@ -37,6 +40,7 @@ from videoforge_persistence.models import (
 )
 from videoforge_persistence.projection import get_pipeline
 from videoforge_persistence.repositories import VersionStatusRow
+from videoforge_persistence.repositories.projects import IDLE, ProjectActivity
 from videoforge_shared.enums import (
     ArtifactKind,
     ArtifactState,
@@ -51,6 +55,7 @@ __all__ = [
     "ArtifactDetail",
     "ArtifactSummary",
     "BatchReviewResult",
+    "BudgetStatus",
     "BrandingDetail",
     "CaptionCuePreview",
     "CharacterSummary",
@@ -306,6 +311,34 @@ def _caption_cues(meta: dict[str, Any]) -> list[CaptionCuePreview]:
     return cues
 
 
+class JobResponse(BaseModel):
+    id: str
+    status: str
+    task_name: str
+    queue: str
+    attempt: int
+    max_attempts: int
+    error: dict[str, Any] | None = None
+    queued_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @classmethod
+    def of(cls, job: GenerationJob) -> JobResponse:
+        return cls(
+            id=job.id,
+            status=job.status.value,
+            task_name=job.task_name,
+            queue=job.queue,
+            attempt=job.attempt,
+            max_attempts=job.max_attempts,
+            error=job.error,
+            queued_at=job.queued_at,
+            started_at=job.started_at,
+            finished_at=job.finished_at,
+        )
+
+
 class ArtifactSummary(BaseModel):
     id: str
     kind: str
@@ -343,12 +376,31 @@ class ArtifactSummary(BaseModel):
 
 class ArtifactDetail(ArtifactSummary):
     versions: list[VersionSummary] = Field(default_factory=list)
+    #: The most recent job that ran against this artifact (M5-06).
+    #:
+    #: Carried here rather than on its own ``GET /artifacts/{id}/job`` because
+    #: the review screen already fetches this payload and already polls it
+    #: while the state is GENERATING — the two facts change together, and a
+    #: second endpoint would mean a second poll that can disagree with the
+    #: first. "Why is this stage failed?" is answered by the same response that
+    #: says it is failed.
+    #:
+    #: ``None`` is a real answer, not an error: seeded content and any artifact
+    #: whose project predates its job rows have no job to show.
+    job: JobResponse | None = None
 
     @classmethod
     def of_detail(
-        cls, artifact: Artifact, versions: list[VersionSummary]
+        cls,
+        artifact: Artifact,
+        versions: list[VersionSummary],
+        job: GenerationJob | None = None,
     ) -> ArtifactDetail:
-        return cls(**ArtifactSummary.of(artifact).model_dump(), versions=versions)
+        return cls(
+            **ArtifactSummary.of(artifact).model_dump(),
+            versions=versions,
+            job=JobResponse.of(job) if job is not None else None,
+        )
 
 
 class ProjectSummary(BaseModel):
@@ -357,16 +409,91 @@ class ProjectSummary(BaseModel):
     title: str | None = None
     phase: str
     created_at: datetime
+    #: Who has to act next (M5-08) — the dashboard's whole question.
+    #:
+    #: Not derivable from ``phase`` on the client, which is exactly why it is
+    #: sent: ``derive_phase`` returns a stage's *generating* phase both while
+    #: that stage runs and while it sits unstarted, so a project waiting on a
+    #: button press reports ``SCRIPTING`` and would be filed under "working".
+    waiting_on: str = WaitingOn.HUMAN.value
+    #: §12.4's orthogonal ``HAS_FAILURES`` flag, surfaced at last.
+    #:
+    #: A failed image among twenty does not move the phase — the other
+    #: nineteen are fine — so without this a broken project looks healthy on
+    #: the list. Orthogonal to ``waiting_on`` rather than a value of it,
+    #: because a failure and a running worker coexist happily.
+    has_failures: bool = False
 
     @classmethod
-    def of(cls, project: VideoProject) -> ProjectSummary:
+    def of(
+        cls, project: VideoProject, activity: ProjectActivity = IDLE
+    ) -> ProjectSummary:
         return cls(
             id=project.id,
             topic=project.topic,
             title=project.title,
             phase=project.phase.value,
             created_at=project.created_at,
+            waiting_on=waiting_on(project.phase, generating=activity.generating).value,
+            has_failures=activity.failed,
         )
+
+
+class BudgetStatus(BaseModel):
+    """Today's estimated provider spend against the daily cap (S10, M5-07).
+
+    **Money crosses the wire as strings.** ``unit_cost_estimate`` is NUMERIC
+    precisely so a spend cap cannot drift, and serialising it as a JSON number
+    would hand it to a client that has only IEEE doubles — undoing at the last
+    hop the care taken at every earlier one. These are display values, and a
+    string is the exact shape a display wants.
+
+    **Deployment-wide, not this project's.** ``provider_usage`` has no
+    workspace column and the cap is a per-day total across everything, so
+    ``spent`` counts other projects' generations too. ``project_spent`` is
+    carried alongside for exactly this reason: a single number on a project
+    screen would be read as that project's cost, and would be wrong.
+    """
+
+    spent: str
+    limit: str
+    remaining: str
+    currency: str
+    #: Estimated spend on jobs belonging to *this* project.
+    project_spent: str
+    #: The cap is reached; paid stages will be refused until UTC midnight.
+    exhausted: bool
+    #: False when the limit is ``<= 0``, which means **no cap** rather than
+    #: "spend nothing" — the same reading ``check_budget`` takes, because a
+    #: blanked config should keep working rather than halt every generation.
+    capped: bool
+
+    @classmethod
+    def of(
+        cls,
+        spent: Decimal,
+        limit: Decimal,
+        project_spent: Decimal,
+        *,
+        currency: str,
+    ) -> BudgetStatus:
+        capped = limit > 0
+        return cls(
+            spent=_money(spent),
+            limit=_money(limit),
+            remaining=_money(remaining_budget(spent, limit)),
+            currency=currency,
+            project_spent=_money(project_spent),
+            exhausted=capped and spent >= limit,
+            capped=capped,
+        )
+
+
+def _money(value: Decimal) -> str:
+    """Two decimal places, rounded half-up like a price list rather than
+    banker's rounding, which is ``Decimal``'s default and would show 2.675 as
+    2.67 on one line and 2.68 on another."""
+    return str(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 class StageSummary(BaseModel):
@@ -391,6 +518,16 @@ class StageSummary(BaseModel):
     #: Which of those are not approved yet. Empty means runnable.
     unmet: list[str] = Field(default_factory=list)
     can_generate: bool = False
+    #: Why the stage cannot run for a reason that is **not** a missing input
+    #: (M5-07). Today that is only the daily spend cap.
+    #:
+    #: A composed sentence rather than a code the client maps, unlike
+    #: ``unmet`` and ``rejection_reasons``. Those are closed vocabularies the
+    #: UI renders as labels; this one carries *numbers* — what has been spent
+    #: against what limit — so a code would force the client to reassemble a
+    #: sentence the server can already write, and every future blocker would
+    #: need a client change to become sayable.
+    blocked_reason: str | None = None
 
 
 class SceneSummary(BaseModel):
@@ -435,6 +572,11 @@ class ProjectDetail(ProjectSummary):
     stages: list[StageSummary] = Field(default_factory=list)
     #: Scenes of the approved scene set, empty until one is approved.
     scenes: list[SceneSummary] = Field(default_factory=list)
+    #: Today's spend against the cap (M5-07), on the screen where money is
+    #: spent. Rides along here rather than on its own endpoint for the reason
+    #: ``ArtifactDetail.job`` does: this payload is already polled while
+    #: something is generating, which is exactly when the number moves.
+    budget: BudgetStatus | None = None
 
     @classmethod
     def of_detail(
@@ -442,19 +584,37 @@ class ProjectDetail(ProjectSummary):
         project: VideoProject,
         artifacts: list[Artifact],
         scenes: list[Scene] | None = None,
+        budget: BudgetStatus | None = None,
     ) -> ProjectDetail:
-        summary = ProjectSummary.of(project)
+        # Built from the artifacts already in hand rather than by querying
+        # again: this is the one call site that has them, and a second scan
+        # here could disagree with the list's answer for the same project.
+        summary = ProjectSummary.of(
+            project,
+            ProjectActivity(
+                generating=any(
+                    ArtifactState(a.state) is ArtifactState.GENERATING
+                    for a in artifacts
+                ),
+                failed=any(
+                    ArtifactState(a.state) is ArtifactState.FAILED for a in artifacts
+                ),
+            ),
+        )
         return cls(
             **summary.model_dump(),
             series_id=project.series_id,
             active_pointers=dict(project.active_pointers or {}),
             artifacts=[ArtifactSummary.of(a) for a in artifacts],
-            stages=_stages(artifacts),
+            stages=_stages(artifacts, budget),
             scenes=[SceneSummary.of(s) for s in scenes or []],
+            budget=budget,
         )
 
 
-def _stages(artifacts: list[Artifact]) -> list[StageSummary]:
+def _stages(
+    artifacts: list[Artifact], budget: BudgetStatus | None = None
+) -> list[StageSummary]:
     """Project the pipeline graph onto one project's artifacts.
 
     Approval is read from ``artifact.state``, not from ``active_pointers``: the
@@ -484,6 +644,19 @@ def _stages(artifacts: list[Artifact]) -> list[StageSummary]:
         found = by_kind.get(stage.produces)
         unmet = sorted(k.value for k in pipeline.unmet(stage.produces, approved))
         state = ArtifactState(found.state) if found else None
+        # The cap blocks *paid* stages only (M5-07). `render`, `timeline`,
+        # `thumbnail` and `package` call nobody, so a project that has already
+        # been paid for can always be finished and downloaded — a spend limit
+        # that stranded a completed video in the system would be worse than
+        # the overspend it prevents.
+        blocked: str | None = None
+        if budget is not None and budget.exhausted and stage.bills:
+            blocked = (
+                f"Daily spend limit reached — {budget.spent} of "
+                f"{budget.limit} {budget.currency} estimated. "
+                "Resets at UTC midnight."
+            )
+
         summaries.append(
             StageSummary(
                 kind=stage.produces.value,
@@ -493,11 +666,13 @@ def _stages(artifacts: list[Artifact]) -> list[StageSummary]:
                 stale_since=found.stale_since if found else None,
                 requires=sorted(k.value for k in stage.requires),
                 unmet=unmet,
+                blocked_reason=blocked,
                 # A stage is runnable when its inputs are approved AND the FSM
                 # would accept the move — a stage mid-generation must not offer
-                # a second Generate.
+                # a second Generate — AND nothing else is blocking it.
                 can_generate=(
                     not unmet
+                    and blocked is None
                     and stage.produces in STAGE_TASKS
                     and (
                         state is None
@@ -520,34 +695,6 @@ def _rank(artifact: Artifact) -> int:
         ArtifactState.APPROVED: 5,
     }
     return order[ArtifactState(artifact.state)]
-
-
-class JobResponse(BaseModel):
-    id: str
-    status: str
-    task_name: str
-    queue: str
-    attempt: int
-    max_attempts: int
-    error: dict[str, Any] | None = None
-    queued_at: datetime
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-
-    @classmethod
-    def of(cls, job: GenerationJob) -> JobResponse:
-        return cls(
-            id=job.id,
-            status=job.status.value,
-            task_name=job.task_name,
-            queue=job.queue,
-            attempt=job.attempt,
-            max_attempts=job.max_attempts,
-            error=job.error,
-            queued_at=job.queued_at,
-            started_at=job.started_at,
-            finished_at=job.finished_at,
-        )
 
 
 # --------------------------------------------------------------------------- #

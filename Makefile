@@ -137,7 +137,9 @@ check-js: lint-js typecheck-js fmt-check-js ## Every frontend gate
 E2E_IMAGE := videoforge-e2e:local
 
 e2e-image: ## Build the Playwright runner image
-	docker build -f docker/e2e/Dockerfile -t $(E2E_IMAGE) docker/e2e
+	# Context is the repo root, not docker/e2e: the image bakes the frontend's
+	# dependencies and needs its package.json and lockfile (M5-12).
+	docker build -f docker/e2e/Dockerfile -t $(E2E_IMAGE) .
 
 # The seed is a *precondition*, not a convenience. The flow's first action is
 # creating a project, and POST /projects 409s when no workspace row exists —
@@ -182,7 +184,7 @@ e2e: e2e-guard e2e-image e2e-seed ## Run the end-to-end suite (needs `make up-pr
 	  -v /app/node_modules \
 	  -e BASE_URL=http://nginx \
 	  -w /app $(E2E_IMAGE) \
-	  sh -c "npm install --no-audit --no-fund && npx playwright test"
+	  npx playwright test
 
 check: lint fmt-check typecheck test ## Run every Python quality gate, in CI order
 

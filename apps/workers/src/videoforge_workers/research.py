@@ -20,6 +20,7 @@ from videoforge_shared.tasks import RESEARCH_GENERATE
 from videoforge_workers.skeleton import JobContext, videoforge_task
 from videoforge_workers.stages import (
     complete_generation,
+    content_language,
     llm_complete,
     load_artifact,
 )
@@ -58,6 +59,7 @@ def research_body(ctx: JobContext) -> None:
         RESEARCH_TEMPLATE,
         topic=project.topic,
         target_seconds=round(target_ms / 1000),
+        language=content_language().name,
     )
     result = llm_complete(ctx, prompt, _RESPONSE_SCHEMA)
 

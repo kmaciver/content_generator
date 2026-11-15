@@ -24,6 +24,34 @@ from videoforge_shared.ids import new_ulid
 __all__ = ["JobRepository", "ProviderUsageRepository", "ReservedJob"]
 
 
+def _clock() -> sa.Function[Any]:
+    """``clock_timestamp()`` — the wall clock *now*, not the transaction's.
+
+    Postgres ``now()`` is ``transaction_timestamp()``: frozen at BEGIN and
+    identical for every statement in the transaction. That is the right choice
+    for ``created_at`` and friends, where rows written together should agree.
+
+    It is catastrophically wrong for the two columns that bracket a duration.
+    ``skeleton.py`` runs the stage body and ``mark_succeeded`` in **one**
+    transaction, so ``finished_at = now()`` recorded the instant that
+    transaction *began* — before the work. Measured on this database: an image
+    job whose provider calls took 149.5 seconds (timed in Python with
+    ``time.monotonic``) was stored as having taken 10 milliseconds. Every
+    finished job in the table was wrong, by the entire duration of its own
+    work, and nothing noticed because a duration nobody had rendered cannot
+    look wrong. M5-06 then rendered it, and M5-10 measured it.
+
+    ``started_at`` moves too, though ``claim`` happens to be the first
+    statement in its transaction and was therefore accidentally correct. The
+    pair should be read off the same clock, or the next refactor that adds a
+    statement before the claim reintroduces this quietly.
+
+    Boundaries keep ``now()``: ``claim_orphans``' cutoff and ``spend_today``'s
+    UTC midnight both *want* one stable instant per transaction.
+    """
+    return sa.func.clock_timestamp()
+
+
 @dataclass(frozen=True, slots=True)
 class ReservedJob:
     """Result of :meth:`JobRepository.reserve`.
@@ -66,6 +94,33 @@ class JobRepository(Repository):
             .order_by(GenerationJob.created_at.desc())
             .limit(1)
         ).one_or_none()
+
+    def latest_for_artifact(self, artifact_id: str) -> GenerationJob | None:
+        """The most recent job that ran against this artifact.
+
+        The one query the review screen needs and never had: `generation_job`
+        has recorded queue, attempt and the provider's own error message since
+        M1-04, and nothing in the client had a way to ask for any of it. A
+        stage that failed showed a red badge and no reason, so diagnosing it
+        meant reading a container log.
+
+        **Most recent, not "the live one".** A finished job is exactly what a
+        reviewer looking at a FAILED stage wants — `live_by_idempotency_key`
+        filters the dead statuses out, which is right for reservation and
+        precisely wrong here. History is the answer.
+
+        Tie-broken on `id` because `created_at` can collide: two jobs inserted
+        in one transaction share `now()`, since Postgres holds the transaction
+        timestamp fixed. ULIDs sort lexicographically by time, so the id is a
+        finer-grained version of the same ordering rather than a second,
+        unrelated one.
+        """
+        return self.session.scalars(
+            sa.select(GenerationJob)
+            .where(GenerationJob.artifact_id == artifact_id)
+            .order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc())
+            .limit(1)
+        ).first()
 
     def reserve(
         self,
@@ -182,7 +237,7 @@ class JobRepository(Repository):
             )
             .values(
                 status=JobStatus.RUNNING,
-                started_at=sa.func.now(),
+                started_at=_clock(),
                 attempt=GenerationJob.attempt + 1,
                 celery_task_id=celery_task_id,
             )
@@ -197,7 +252,7 @@ class JobRepository(Repository):
                 GenerationJob.id == job_id,
                 GenerationJob.status == JobStatus.RUNNING,
             )
-            .values(status=JobStatus.SUCCEEDED, finished_at=sa.func.now())
+            .values(status=JobStatus.SUCCEEDED, finished_at=_clock())
         )
         return affected_rows(result) == 1
 
@@ -218,7 +273,7 @@ class JobRepository(Repository):
             .values(
                 status=target,
                 error=error,
-                finished_at=None if requeue else sa.func.now(),
+                finished_at=None if requeue else _clock(),
             )
         )
         return affected_rows(result) == 1
@@ -242,6 +297,9 @@ class JobRepository(Repository):
         the error term is skew rather than elapsed time. Skew in one direction
         reaps jobs that are still running, in the other it never reaps at all.
         """
+        # ``now()`` here, deliberately, where ``started_at`` uses the wall
+        # clock: this is a *boundary*, and one stable instant per sweep is what
+        # makes "older than X" mean the same thing for every row it reaps.
         cutoff = sa.func.now() - sa.cast(sa.literal(older_than), sa.Interval)
         stmt = (
             sa.select(GenerationJob)
@@ -256,7 +314,7 @@ class JobRepository(Repository):
             self.session.execute(
                 sa.update(GenerationJob)
                 .where(GenerationJob.id.in_([job.id for job in jobs]))
-                .values(status=JobStatus.ORPHANED, finished_at=sa.func.now())
+                .values(status=JobStatus.ORPHANED, finished_at=_clock())
             )
         return jobs
 
@@ -282,7 +340,12 @@ class ProviderUsageRepository(Repository):
         model: str,
         operation: str,
         latency_ms: int,
-        unit_cost_estimate: float = 0.0,
+        # ``Decimal`` accepted as well as ``float``: the column is NUMERIC so a
+        # spend cap cannot drift, and a caller that already holds exact money
+        # should not have to round-trip it through a binary float to store it.
+        # Provider adapters estimate in float and pass one; that is fine, since
+        # an estimate has no exactness to lose.
+        unit_cost_estimate: Decimal | float = 0.0,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         images: int | None = None,
@@ -329,6 +392,32 @@ class ProviderUsageRepository(Repository):
     def spend_since(self, since: datetime) -> Decimal:
         """Total estimated spend since a caller-supplied instant."""
         return self._spend_where(ProviderUsage.created_at >= since)
+
+    def spend_today_for_project(self, project_id: str) -> Decimal:
+        """Estimated spend on this project's jobs, all time (M5-07).
+
+        Shown next to the deployment-wide daily total because one number on a
+        project screen gets read as that project's cost, and the capped number
+        is not that. This is the honest answer to "what did this video cost?"
+
+        **All time, not today.** A video generated across two days would
+        otherwise show a cost lower than it was, which is the one thing this
+        number exists not to do. The daily window belongs to the cap, and only
+        to the cap.
+
+        Series-scoped jobs (branding, reference sheets — ADR-016) have a NULL
+        ``project_id`` and are therefore excluded. That is correct rather than
+        a gap: a reference sheet is generated once and consumed by every
+        episode, so charging it to whichever project happened to trigger it
+        would overstate that one and understate all the others.
+        """
+        return self._spend_where(
+            ProviderUsage.job_id.in_(
+                sa.select(GenerationJob.id).where(
+                    GenerationJob.project_id == project_id
+                )
+            )
+        )
 
     def spend_today(self) -> Decimal:
         """Estimated spend since the start of the current **UTC** day (S10).

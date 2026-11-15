@@ -30,8 +30,15 @@ services:
     #
     # Real deployments must not copy it; §24's migration notes are where the
     # managed-database story belongs.
+    # **5433, not 5432.** A developer machine very often already has a Postgres
+    # on the conventional port — this one collided with another project's
+    # container the first time it was used, and because a failed port bind
+    # aborts `up`, a convenience for looking at data stopped the whole stack
+    # from starting. A diagnostic must never be able to do that.
+    #
+    # The dev profile keeps 5432, so the two profiles can also be up at once.
     ports:
-      - "127.0.0.1:${POSTGRES_PORT_HOST:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT_HOST:-5433}:5432"
 
   redis:
     restart: unless-stopped

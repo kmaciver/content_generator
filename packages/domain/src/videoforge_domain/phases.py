@@ -12,11 +12,27 @@ Pure: a pipeline and a mapping in, an enum out. No session, no clock, no I/O.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import StrEnum
 
 from videoforge_domain.pipeline import Pipeline
 from videoforge_shared.enums import ArtifactKind, ArtifactState, ProjectPhase
 
-__all__ = ["derive_phase", "has_failures"]
+__all__ = ["WaitingOn", "derive_phase", "has_failures", "waiting_on"]
+
+
+class WaitingOn(StrEnum):
+    """Who has to act next for a project to move (M5-08).
+
+    Not a phase and not stored: it is a *reading* of one, and the dashboard
+    is the only thing that wants it.
+    """
+
+    #: A person: approve, reject, retry a failure, or press Generate.
+    HUMAN = "human"
+    #: A worker is running. Nothing a person does now makes it faster.
+    MACHINE = "machine"
+    #: Finished. The package is built and there is nothing left to do here.
+    NOBODY = "nobody"
 
 
 def derive_phase(
@@ -70,3 +86,36 @@ def has_failures(states: Mapping[ArtifactKind, ArtifactState]) -> bool:
     whatever phase the project is otherwise in.
     """
     return any(state is ArtifactState.FAILED for state in states.values())
+
+
+#: Phases in which the pipeline has nothing left to produce.
+#:
+#: ``PUBLISHED`` is never derived (publishing is an act, not a consequence of
+#: approvals) but a project that reached it is just as finished.
+_DONE = frozenset({ProjectPhase.READY_TO_PUBLISH, ProjectPhase.PUBLISHED})
+
+
+def waiting_on(phase: ProjectPhase, *, generating: bool) -> WaitingOn:
+    """Who the project is blocked on — the dashboard's only question (M5-08).
+
+    **Derived from the artifacts, not read off the phase**, and the difference
+    is not academic. ``derive_phase`` returns a stage's *generating* phase both
+    when that stage is actually running and when it has produced nothing yet
+    (rule 3 — §12.4 has no "ready to run" phase to return). So a project whose
+    research is approved and whose script nobody has started reports
+    ``SCRIPTING``, which reads as "a machine is working on it" and means
+    exactly the opposite: it is sitting there waiting for someone to press a
+    button. A dashboard built on the phase string alone would file the one
+    project needing attention under "working".
+
+    The rule that *is* true is simpler than the phases suggest: **if no worker
+    is running and the pipeline is not finished, only a person can move it.**
+    Approve, reject, retry, or generate the next stage — every remaining door
+    is opened by a human. So one boolean over the artifact states decides it,
+    and the phase is consulted only for "is this done".
+    """
+    if generating:
+        return WaitingOn.MACHINE
+    if phase in _DONE:
+        return WaitingOn.NOBODY
+    return WaitingOn.HUMAN

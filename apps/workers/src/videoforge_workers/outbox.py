@@ -6,13 +6,20 @@ first can announce a transaction that later rolls back. Writing the event into
 the same transaction as the state change makes the two atomic, and this task
 does the publishing afterwards, from committed rows only.
 
-**Finding S7: there is no consumer.** The drain publishes to Redis pub/sub and
-nothing subscribes, deliberately. The outbox itself is load-bearing for audit
-and correctness regardless of who reads it, while SSE — the eventual consumer —
-waits for M5, when there is real UI to judge whether it earns its complexity
-(ADR-006 commits to polling first, and §19.6 admits the uWSGI SSE story is
-brittle). Building the durable half now and the delivery half later is the
-cheap ordering; the reverse would not be.
+**Finding S7, now closed: there is no consumer, and there will not be one in
+the browser.** ADR-017 measured what SSE would buy — a mean of 750 ms off waits
+whose p50 is 19.9 s and whose heaviest stage is 129 s — against what it would
+cost on this uWSGI: one of only eight request slots held per stream, killed
+every 30 seconds by ``harakiri``. It does not earn its complexity, and polling
+is now the delivery mechanism permanently rather than provisionally.
+
+The publish stays anyway, and this is not sentiment. The outbox is load-bearing
+for audit and correctness regardless of who reads it (ADR-003), which was always
+the argument for building the durable half first; the publish itself is one
+pipelined command per batch on a connection that already exists. What ADR-017
+rejects is *SSE to the browser*, not eventing — a live channel is the obvious
+substrate for a consumer that is not a browser, such as the M6 reconciler or an
+external notifier.
 
 Redis pub/sub is fire-and-forget: a message with no subscriber is dropped, not
 queued. That is *correct* here — the database is the state of record and these
@@ -36,9 +43,9 @@ from videoforge_workers.skeleton import videoforge_task
 logger = logging.getLogger(__name__)
 
 #: One channel for everything. Per-project channels would let a subscriber
-#: filter server-side, but with no subscriber at all (S7) that is speculative
-#: design; splitting later is a one-line change and needs the consumer's real
-#: filtering requirements to get right.
+#: filter server-side, but with no subscriber at all (S7, settled by ADR-017)
+#: that is speculative design; splitting later is a one-line change and needs
+#: the consumer's real filtering requirements to get right.
 EVENTS_CHANNEL = "videoforge:events"
 
 #: Rows per pass. Bounded so one pathological backlog cannot hold a

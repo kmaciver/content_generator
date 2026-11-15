@@ -52,6 +52,7 @@ from videoforge_shared.enums import (
     VersionOrigin,
 )
 from videoforge_shared.hashing import sha256_bytes
+from videoforge_shared.language import Language, resolve
 from videoforge_shared.settings import get_worker_settings, load_worker_settings
 from videoforge_workers.skeleton import JobContext
 
@@ -115,6 +116,23 @@ def require_budget(ctx: JobContext) -> None:
         return
     spent = ctx.uow.usage.spend_today()
     check_budget(spent, limit, currency=settings.core.cost_currency)
+
+
+def content_language() -> Language:
+    """The language every audience-facing artifact is written in.
+
+    Resolved on each call from the *cached* settings getter, so it costs a dict
+    lookup rather than a re-read of the environment — and stays a function
+    rather than a module constant because a constant would be captured at
+    import time, before Celery forks, and could not be changed without
+    rebuilding the image.
+
+    Raises on a malformed tag, deliberately, landing the same way a missing API
+    key does: at the first stage that needs it, with a message about tags. The
+    alternative is an English script out of a deployment configured for
+    Portuguese, which nothing would flag.
+    """
+    return resolve(get_worker_settings().core.content_language)
 
 
 def llm_complete(
@@ -223,6 +241,13 @@ def complete_generation(
             "model": result.provider_meta.get("model"),
             "provider_meta": result.provider_meta,
             "latency_ms": result.latency_ms,
+            # Recorded because `prompt_template_ref` cannot carry it. That ref
+            # pins the template's *content*; the language arrives as render
+            # context, so an identical ref can produce English one day and
+            # Portuguese the next. Without this, "why is this version in
+            # English?" is unanswerable from the audit trail — the same gap the
+            # content-pinned ref closed for template edits (§10.3 rule 4).
+            "content_language": content_language().tag,
         },
     )
 

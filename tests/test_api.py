@@ -9,6 +9,7 @@ payload actually reaches the client.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -816,6 +817,440 @@ class TestContactSheetBatch:
         detail = client.get(f"/api/v1/projects/{project_id}").get_json()
         states = {a["state"] for a in detail["artifacts"] if a["kind"] == "image"}
         assert states == {"APPROVED"}
+
+
+class TestDashboard:
+    """M5-08 — who is blocked, on the list that used to be links.
+
+    The load-bearing claim is that ``waiting_on`` cannot be computed from
+    ``phase``, and these tests are what make it checkable rather than asserted
+    in a comment.
+    """
+
+    def _row(self, client: FlaskClient, project_id: str) -> dict[str, Any]:
+        items = client.get("/api/v1/projects").get_json()["items"]
+        return next(dict(p) for p in items if p["id"] == project_id)
+
+    def test_a_new_project_waits_on_a_person(
+        self, client: FlaskClient, workspace: str
+    ) -> None:
+        """DRAFT: a topic and nothing else. Nobody is generating and the thing
+        that moves it is a button press."""
+        project_id = _create_project(client)
+
+        row = self._row(client, project_id)
+
+        assert row["phase"] == "DRAFT"
+        assert row["waiting_on"] == "human"
+        assert row["has_failures"] is False
+
+    def test_a_generating_project_waits_on_a_machine(
+        self, client: FlaskClient, workspace: str
+    ) -> None:
+        project_id = _create_project(client)
+        client.post(
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
+        )
+
+        assert self._row(client, project_id)["waiting_on"] == "machine"
+
+    def test_an_unstarted_stage_waits_on_a_person_though_the_phase_says_otherwise(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """**The reason this field exists.**
+
+        Research approved, script not started: ``derive_phase`` returns
+        ``SCRIPTING``, because §12.4 has no "ready to run" phase and rule 3
+        falls back to the next stage's *generating* phase. Read literally that
+        says a machine is working on it. Nothing is. The project is sitting
+        there waiting for someone to press Generate, and a dashboard grouping
+        on the phase string would file the one project needing attention under
+        "Working" — where nobody looks, because those move on their own.
+        """
+        project_id = _create_project(client)
+        sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.create(project_id, ArtifactKind.RESEARCH, None)
+            uow.flush()
+            version = uow.versions.add_version(
+                artifact,
+                origin=VersionOrigin.GENERATED,
+                content_hash="h",
+                inline_content={"findings": []},
+            )
+            artifact.state = ArtifactState.AWAITING_APPROVAL
+            version_id = version.id
+        # Approved through the endpoint, not by writing APPROVED into the
+        # column. `phase` is a *cache* recomputed by the projection on every
+        # transition (§12.4), so setting the state by hand leaves it at DRAFT
+        # and this test would assert against a stale value rather than the one
+        # the dashboard actually reads.
+        assert (
+            client.post(
+                f"/api/v1/artifact-versions/{version_id}/reviews/approve", json={}
+            ).status_code
+            == 200
+        )
+
+        row = self._row(client, project_id)
+
+        assert row["phase"] == "SCRIPTING"
+        assert row["waiting_on"] == "human"
+
+    def test_a_failure_is_visible_without_moving_the_phase(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """§12.4's ``HAS_FAILURES``, orthogonal by design and invisible until
+        now: a failed image among twenty leaves the phase where it was, because
+        the other nineteen really are fine. So the flag is the only thing that
+        can say a healthy-looking row is not."""
+        project_id = _create_project(client)
+        sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.create(project_id, ArtifactKind.RESEARCH, None)
+            uow.flush()
+            artifact.state = ArtifactState.FAILED
+
+        row = self._row(client, project_id)
+
+        assert row["has_failures"] is True
+        # Still a person's move — retry is a human action.
+        assert row["waiting_on"] == "human"
+
+    def test_one_query_serves_the_whole_page(
+        self, client: FlaskClient, workspace: str
+    ) -> None:
+        """Three projects, one grouped scan. The list polls while anything is
+        running, so an N+1 here would be an N+1 every three seconds."""
+        ids = [_create_project(client, topic=f"topic {n}") for n in range(3)]
+        client.post(
+            f"/api/v1/projects/{ids[0]}/generations", json={"stage": "research"}
+        )
+
+        items = client.get("/api/v1/projects").get_json()["items"]
+
+        by_id = {p["id"]: p["waiting_on"] for p in items}
+        assert by_id[ids[0]] == "machine"
+        assert by_id[ids[1]] == "human"
+        assert by_id[ids[2]] == "human"
+
+    def test_the_detail_agrees_with_the_list(
+        self, client: FlaskClient, workspace: str
+    ) -> None:
+        """The detail payload derives this from artifacts it already holds
+        rather than running the aggregate again — so this asserts the two paths
+        cannot drift, which is the only risk that arrangement carries."""
+        project_id = _create_project(client)
+        client.post(
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
+        )
+
+        detail = client.get(f"/api/v1/projects/{project_id}").get_json()
+
+        assert detail["waiting_on"] == self._row(client, project_id)["waiting_on"]
+
+
+class TestSpendCap:
+    """M5-07 — the daily cap (S10), made visible and made fast to refuse.
+
+    The cap has existed since M3-11 and was **invisible**: it stopped work at
+    the provider call site, from a number no screen had ever shown, so the
+    first sign of it was a stage failing for a reason that read like a vendor
+    outage. Nothing here changes what the cap does — the worker's check is
+    still the guard. These tests pin what it now *says*.
+    """
+
+    def _spend(self, client: FlaskClient, db_engine: Engine, amount: str) -> str:
+        """Burn ``amount`` on a **different** project's job.
+
+        Deliberately another project: it proves `spent` is deployment-wide (the
+        cap is a daily total across everything) while `project_spent` stays
+        honest about whose money it was.
+        """
+        other = _create_project(client, topic="a different video")
+        job_id = client.post(
+            f"/api/v1/projects/{other}/generations", json={"stage": "research"}
+        ).get_json()["job_id"]
+        sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
+        with unit_of_work(sessions) as uow:
+            uow.usage.record(
+                job_id=job_id,
+                provider="anthropic",
+                model="claude-x",
+                operation="complete",
+                latency_ms=100,
+                unit_cost_estimate=Decimal(amount),
+            )
+        return other
+
+    def _stage(self, client: FlaskClient, project_id: str, kind: str) -> dict[str, Any]:
+        body = client.get(f"/api/v1/projects/{project_id}").get_json()
+        return next(dict(s) for s in body["stages"] if s["kind"] == kind)
+
+    def test_the_budget_reaches_the_screen(
+        self, client: FlaskClient, workspace: str
+    ) -> None:
+        """Money crosses as **strings**. `unit_cost_estimate` is NUMERIC so a
+        spend cap cannot drift, and handing it to a client as a JSON number
+        would undo that at the last hop for no gain — these are display
+        values."""
+        project_id = _create_project(client)
+
+        budget = client.get(f"/api/v1/projects/{project_id}").get_json()["budget"]
+
+        assert budget["limit"] == "10.00"
+        assert budget["currency"] == "USD"
+        assert budget["capped"] is True
+        assert budget["exhausted"] is False
+        assert isinstance(budget["spent"], str)
+
+    def test_another_projects_spend_counts_against_the_cap_but_not_the_video(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """Both numbers, and why there are two.
+
+        The cap is deployment-wide, so `spent` must include work this project
+        never asked for. A single figure on a project screen would be read as
+        that project's cost and would be wrong, which is the entire reason
+        `project_spent` exists beside it.
+        """
+        self._spend(client, db_engine, "4.00")
+        project_id = _create_project(client)
+
+        budget = client.get(f"/api/v1/projects/{project_id}").get_json()["budget"]
+
+        assert budget["spent"] == "4.00"
+        assert budget["remaining"] == "6.00"
+        assert budget["project_spent"] == "0.00"
+
+    def test_an_exhausted_cap_blocks_paid_stages_with_the_reason(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """The same rule as `unmet`: the server owns the decision and says why.
+
+        A disabled button with no explanation is the failure this replaces —
+        and the reason carries the numbers, which is why it is a sentence
+        rather than a code the client maps to a label.
+        """
+        self._spend(client, db_engine, "10.00")
+        project_id = _create_project(client)
+
+        research = self._stage(client, project_id, "research")
+
+        assert research["can_generate"] is False
+        assert "Daily spend limit reached" in research["blocked_reason"]
+        assert "10.00" in research["blocked_reason"]
+
+    def test_free_stages_are_never_blocked_by_the_cap(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """**The load-bearing test of this ticket.**
+
+        `render`, `timeline`, `thumbnail` and `package` call no provider, so a
+        spend limit must not stand between an operator and the video they have
+        already paid for. Stranding a finished render behind a cap would be a
+        worse failure than the overspend the cap prevents.
+
+        These stages are blocked here by `unmet` — nothing upstream is approved
+        on a bare project — and that is a different field with a different
+        meaning: it clears on its own as the pipeline advances, and
+        `blocked_reason` would not.
+        """
+        self._spend(client, db_engine, "10.00")
+        project_id = _create_project(client)
+
+        for kind in ("timeline", "render", "thumbnail", "package"):
+            assert self._stage(client, project_id, kind)["blocked_reason"] is None
+
+    def test_generating_a_paid_stage_is_refused_before_a_job_exists(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """409, not 202-then-fail.
+
+        Without the pre-flight this returns a receipt, takes an idempotency
+        key, marks the artifact GENERATING and lands it FAILED — an operator
+        waiting on a round trip to a worker to be told a number the API knew
+        before it answered.
+        """
+        self._spend(client, db_engine, "12.00")
+        project_id = _create_project(client)
+
+        response = client.post(
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
+        )
+
+        assert response.status_code == 409
+        assert response.get_json()["title"] == "Budget exhausted"
+        # And no artifact was created — the refusal costs nothing to undo.
+        body = client.get(f"/api/v1/projects/{project_id}").get_json()
+        assert body["artifacts"] == []
+
+    def test_a_free_stage_is_not_refused_by_the_budget(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """`render` on a bare project is still refused — by the *admission*
+        check, for want of an approved timeline, which is the pipeline being
+        right. What matters is that the budget was not what stopped it."""
+        self._spend(client, db_engine, "12.00")
+        project_id = _create_project(client)
+
+        response = client.post(
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "render"}
+        )
+
+        assert response.status_code == 409
+        assert response.get_json()["title"] != "Budget exhausted"
+
+    def test_no_limit_means_unlimited_not_zero(
+        self, client: FlaskClient, app: Flask, db_engine: Engine, workspace: str
+    ) -> None:
+        """`limit <= 0` reads as "unset" far more often than "spend nothing",
+        and a deployment that blanked the value should keep working rather than
+        halt every generation. Same reading `check_budget` takes."""
+        self._spend(client, db_engine, "99.00")
+        app.config["VIDEOFORGE_SETTINGS"].core.daily_cost_limit = Decimal("0")
+        project_id = _create_project(client)
+
+        body = client.get(f"/api/v1/projects/{project_id}").get_json()
+
+        assert body["budget"]["capped"] is False
+        assert body["budget"]["exhausted"] is False
+        assert self._stage(client, project_id, "research")["blocked_reason"] is None
+        assert (
+            client.post(
+                f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
+            ).status_code
+            == 202
+        )
+
+
+class TestJobOnArtifact:
+    """M5-06 — the job, on the payload that already explains the artifact.
+
+    Every field asserted here has been written to `generation_job` since
+    M1-04 and read by nobody. The first real render failure of this project
+    was diagnosed by reading a container log, with the provider's own message
+    sitting in a column the API had never exposed.
+    """
+
+    def _generating(self, client: FlaskClient) -> tuple[str, str, str]:
+        """A project mid-generation: (project_id, artifact_id, job_id)."""
+        project_id = _create_project(client)
+        job_id = client.post(
+            f"/api/v1/projects/{project_id}/generations", json={"stage": "research"}
+        ).get_json()["job_id"]
+        artifact_id = str(
+            client.get(f"/api/v1/projects/{project_id}").get_json()["artifacts"][0][
+                "id"
+            ]
+        )
+        return project_id, artifact_id, job_id
+
+    def test_the_job_rides_along_with_the_artifact(
+        self, client: FlaskClient, workspace: str
+    ) -> None:
+        """One request, both facts. The review screen already fetches and polls
+        this payload while a stage is GENERATING; a second endpoint would mean
+        a second poll that can disagree with the first about what is happening.
+        """
+        _, artifact_id, job_id = self._generating(client)
+
+        job = client.get(f"/api/v1/artifacts/{artifact_id}").get_json()["job"]
+
+        assert job["id"] == job_id
+        assert job["status"] == "QUEUED"
+        # Queue and task name, which is what "why is this not moving?" starts
+        # from — and `queue` is a stored column rather than something inferred
+        # from the task name precisely so this answer needs no join.
+        assert job["queue"] == RESEARCH_GENERATE.queue
+        assert job["task_name"] == RESEARCH_GENERATE.name
+        assert job["queued_at"] is not None
+        assert job["started_at"] is None
+
+    def test_the_providers_own_message_reaches_the_client(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """The whole ticket in one assertion.
+
+        The worker records `str(exc)` — and only that, never the traceback,
+        because provider exceptions have been known to carry the request
+        payload. This test pins that the message survives the trip to the
+        client, so a failed stage can say *why* instead of showing a red badge.
+        """
+        _, artifact_id, job_id = self._generating(client)
+        sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
+        with unit_of_work(sessions) as uow:
+            uow.jobs.claim(job_id)
+            uow.jobs.mark_failed(
+                job_id,
+                {
+                    "type": "ProviderError",
+                    "message": "anthropic returned 529: overloaded_error",
+                    "task": RESEARCH_GENERATE.name,
+                    "duration_ms": 812,
+                },
+                requeue=False,
+            )
+
+        job = client.get(f"/api/v1/artifacts/{artifact_id}").get_json()["job"]
+
+        assert job["status"] == "FAILED"
+        assert job["error"]["message"] == "anthropic returned 529: overloaded_error"
+        assert job["error"]["type"] == "ProviderError"
+        # Both ends of the duration, so the client can subtract two *server*
+        # timestamps rather than measure against the browser's clock.
+        assert job["started_at"] is not None
+        assert job["finished_at"] is not None
+
+    def test_a_dead_job_is_still_shown(
+        self, client: FlaskClient, workspace: str
+    ) -> None:
+        """`latest_for_artifact`, not `live_by_idempotency_key`.
+
+        Release (M5-05) cancels the job, and CANCELLED is one of the statuses
+        the live lookup filters out — correctly, for reservation. Reusing that
+        lookup here would blank the panel at the exact moment someone is
+        looking at it to find out what just happened.
+        """
+        _, artifact_id, job_id = self._generating(client)
+        client.post(f"/api/v1/artifacts/{artifact_id}/release")
+
+        job = client.get(f"/api/v1/artifacts/{artifact_id}").get_json()["job"]
+
+        assert job["id"] == job_id
+        assert job["status"] == "CANCELLED"
+
+    def test_the_newest_job_wins(self, client: FlaskClient, workspace: str) -> None:
+        """A retried stage shows the retry, not the corpse it replaced."""
+        project_id, artifact_id, first = self._generating(client)
+        client.post(f"/api/v1/artifacts/{artifact_id}/release")
+        second = client.post(
+            f"/api/v1/projects/{project_id}/generations",
+            json={"stage": "research", "regenerate": True},
+        ).get_json()["job_id"]
+        assert second != first
+
+        job = client.get(f"/api/v1/artifacts/{artifact_id}").get_json()["job"]
+
+        assert job["id"] == second
+
+    def test_an_artifact_with_no_job_reports_null(
+        self, client: FlaskClient, db_engine: Engine, workspace: str
+    ) -> None:
+        """Absence is a normal answer, not a 404 and not an error.
+
+        Seeded content (M5-11) and anything edited by hand has no job row, and
+        a client that has to treat "no job" as a failure would render an error
+        panel on a perfectly healthy artifact.
+        """
+        project_id = _create_project(client)
+        sessions = sessionmaker(bind=db_engine, expire_on_commit=False)
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.create(project_id, ArtifactKind.SCRIPT, None)
+            uow.flush()
+            artifact_id = artifact.id
+
+        assert client.get(f"/api/v1/artifacts/{artifact_id}").get_json()["job"] is None
 
 
 class TestReleaseStuckStage:

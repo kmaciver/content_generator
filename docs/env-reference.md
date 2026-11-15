@@ -57,7 +57,7 @@ unset.
 | Variable | Default | Notes |
 |---|---|---|
 | `BACKEND_PORT_HOST` | `5010` | **Not 5000.** macOS Control Center (AirPlay Receiver) holds `:5000` from Monterey onward, and `500x` tends to be crowded by other local projects. |
-| `POSTGRES_PORT_HOST` | `5432` | For `psql` / GUI clients. Published by **both** profiles — `production-local` binds it to `127.0.0.1` only (M5). |
+| `POSTGRES_PORT_HOST` | `5432` dev / `5433` prod-local | For `psql` / GUI clients. Published by **both** profiles; `production-local` binds to `127.0.0.1` only and defaults to **5433**, because 5432 is usually already taken by another project and a failed bind aborts the whole `up` (M5). |
 | `REDIS_PORT_HOST` | `6379` | For `redis-cli`. |
 | `MINIO_PORT_HOST` | `9000` | S3 API. |
 | `MINIO_CONSOLE_PORT_HOST` | `9001` | MinIO web console. |
@@ -103,6 +103,14 @@ Per-capability: `PROVIDERS__LLM__{ADAPTER,MODEL,TIMEOUT_S}`,
 `PROVIDERS__IMAGE__{ADAPTER,MODEL,MIN_REFERENCE_IMAGES}`,
 `PROVIDERS__VOICE__{ADAPTER,VOICE_ID}`.
 
+> **`PROVIDERS__VOICE__VOICE_ID` must be a voice that speaks
+> `CONTENT_LANGUAGE`.** Setting `CONTENT_LANGUAGE=pt-BR` makes the script,
+> narration and captions Portuguese and sends ElevenLabs `language_code=pt`,
+> which tells the model what language the *text* is. It does not make an
+> English voice sound Brazilian — pick a Brazilian voice from the ElevenLabs
+> library and put its id here. The default model, `eleven_turbo_v2_5`, is
+> multilingual and needs no change.
+
 > `PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES` (default `1`) is M3-01's capability
 > gate, and it fails at **configuration time** (ADR-016). An image provider that
 > cannot accept reference images cannot hold a character across scenes, and the
@@ -137,7 +145,8 @@ Leave blank while `PROVIDERS__MODE=mock`.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `DAILY_COST_LIMIT` | `10.00` | A stage refuses to call a provider once the day's *estimated* spend has reached this. At ~20 images per video it is a real guard against a regeneration loop, not a theoretical one. **Enforced since M3-11.** Checked *before* each call — a cap that checked afterwards would produce a very well-documented bill. The window is the **UTC** day, computed database-side so five containers agree on when it started; an operator in UTC-8 sees it reset mid-afternoon. `0` (or blank) means **no cap**, not "spend nothing". |
+| `DAILY_COST_LIMIT` | `10.00` | A stage refuses to call a provider once the day's *estimated* spend has reached this. At ~20 images per video it is a real guard against a regeneration loop, not a theoretical one. **Enforced since M3-11.** Checked *before* each call — a cap that checked afterwards would produce a very well-documented bill. The window is the **UTC** day, computed database-side so five containers agree on when it started; an operator in UTC-8 sees it reset mid-afternoon. `0` (or blank) means **no cap**, not "spend nothing". **Visible since M5-07**: the project screen shows the day's spend against this limit beside what the open video has cost, and once the limit is reached the API refuses a paid stage with 409 rather than queueing a job that dies in a worker. Stages that call no provider — `timeline`, `render`, `thumbnail`, `package` — are never refused, so a video already paid for can always be finished and downloaded. |
+| `CONTENT_LANGUAGE` | `en` | BCP-47 tag for the language the **content** is written and spoken in — research, script, scene narration, burned-in captions, and the Instagram caption and hashtags. `pt-BR` gives Brazilian Portuguese. **Not the interface language** (the UI is English either way) and **not the image prompts**, which stay English on purpose: diffusion models are trained overwhelmingly on English captions, and the prompts are never seen by an audience. A name is sent to the model rather than the tag — `pt-BR` becomes "Brazilian Portuguese", because a model asked for "pt-BR" drifts toward European Portuguese, which a Brazilian audience hears in the first sentence. Any well-formed tag works; `videoforge_shared.language.VERIFIED` lists the ones with a hand-chosen name. A malformed tag (`pt_BR`) fails at the first stage that needs it rather than silently producing English. **Set the voice to match** — see `PROVIDERS__VOICE__VOICE_ID` below; this tells the model which language the *text* is, not which accent to fake. |
 | `COST_CURRENCY` | `USD` | ISO 4217 code the limit and all estimates are expressed in. **A label, not a conversion**: estimates come from price tables inside each adapter, and vendors publish those in USD. If your credits were bought in another currency, that is an FX matter between you and the vendor — it does not change what a call costs in list terms. Change this only alongside the price tables. |
 
 ## Rendering (**D4**: FFmpeg, not Remotion)
@@ -194,6 +203,7 @@ STABILITY_API_KEY=
 
 DAILY_COST_LIMIT=10.00
 COST_CURRENCY=USD
+CONTENT_LANGUAGE=en
 
 RENDER_WIDTH=1080
 RENDER_HEIGHT=1920

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from videoforge_providers.elevenlabs_adapter import ElevenLabsVoiceProvider
 from videoforge_providers.middleware import (
     RetryingLLMProvider,
     UsageRecorder,
@@ -20,6 +22,7 @@ from videoforge_providers.models import (
     LLMResult,
     ProviderError,
     Usage,
+    VoiceRequest,
 )
 from videoforge_providers.protocols import LLMProvider
 from videoforge_providers.registry import UnknownAdapterError, build_llm_provider
@@ -341,6 +344,81 @@ class TestAnthropicAdapter:
             provider.complete(
                 LLMRequest(messages=(LLMMessage(role="system", content="only me"),))
             )
+
+
+class TestElevenLabsLanguage:
+    """``language_code`` on the synthesis request (pt-BR support, 2026-08-20).
+
+    The model infers the language from the text when not told, which is usually
+    right and expensively wrong when it is not: one English proper noun in a
+    Portuguese script can flip the guess, and the result is not an error — it
+    is a narration read with an English accent, which the target audience hears
+    immediately and no test downstream would fail on.
+    """
+
+    def _post(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """Capture the JSON body instead of calling ElevenLabs."""
+        import httpx
+
+        captured: dict[str, Any] = {}
+
+        class _Response:
+            status_code = 200
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "audio_base64": base64.b64encode(b"mp3").decode(),
+                    "alignment": {
+                        "characters": ["o", "i"],
+                        "character_start_times_seconds": [0.0, 0.1],
+                        "character_end_times_seconds": [0.1, 0.2],
+                    },
+                }
+
+        def _fake(url: str, **kwargs: Any) -> _Response:
+            captured.update(kwargs.get("json") or {})
+            return _Response()
+
+        monkeypatch.setattr(httpx, "post", _fake)
+        return captured
+
+    def test_the_language_is_sent_when_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = self._post(monkeypatch)
+        provider = ElevenLabsVoiceProvider(api_key="k", voice_id="v")
+
+        provider.synthesise(VoiceRequest(text="olá mundo", language_code="pt"))
+
+        assert body["language_code"] == "pt"
+
+    def test_it_is_omitted_rather_than_sent_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The API rejects an empty ``language_code``, and "no opinion" is a
+        real position — it is what every deployment had before this parameter
+        existed, so an English-only user must not start getting 422s."""
+        body = self._post(monkeypatch)
+        provider = ElevenLabsVoiceProvider(api_key="k", voice_id="v")
+
+        provider.synthesise(VoiceRequest(text="hello"))
+
+        assert "language_code" not in body
+
+    def test_accented_text_reaches_the_provider_intact(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """httpx encodes the body as UTF-8 JSON; this pins that nothing on the
+        way in strips or mangles a diacritic, because the narration is also the
+        caption text and a lost accent is a misspelling on screen."""
+        body = self._post(monkeypatch)
+        provider = ElevenLabsVoiceProvider(api_key="k", voice_id="v")
+
+        provider.synthesise(
+            VoiceRequest(text="A educação não é ilusão.", language_code="pt")
+        )
+
+        assert body["text"] == "A educação não é ilusão."
 
 
 class TestRecordReplay:

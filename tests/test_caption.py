@@ -109,6 +109,35 @@ class TestHashtags:
             "money",
         ]
 
+    def test_accented_letters_survive(self) -> None:
+        """**A real bug, found when the first Portuguese video was scoped.**
+
+        The filter was ``[^a-z0-9_]``, which turned ``#educação`` into
+        ``#educao`` and ``#saúde`` into ``#sade``. Not a broader tag — a
+        *misspelling*, published under something nobody in Brazil searches for.
+        Instagram supports accented tags and treats them as distinct from their
+        unaccented forms, so stripping the accent does not even degrade
+        gracefully; it invents an empty tag.
+        """
+        assert _normalise(hashtags=["educação", "saúde", "ciência"])["hashtags"] == [
+            "educação",
+            "saúde",
+            "ciência",
+        ]
+
+    def test_punctuation_still_ends_a_tag_in_any_language(self) -> None:
+        """The widened filter must not have widened into punctuation: the
+        reason for stripping at all is that Instagram really does end a tag at
+        the first non-word character."""
+        assert _normalise(hashtags=["saúde-mental", "educação!"])["hashtags"] == [
+            "saúdemental",
+            "educação",
+        ]
+
+    def test_lowercasing_works_on_accented_capitals(self) -> None:
+        """``Ç`` and ``ç`` are one tag, and a model returns both."""
+        assert _normalise(hashtags=["Educação", "EDUCAÇÃO"])["hashtags"] == ["educação"]
+
     def test_duplicates_collapse_after_normalisation(self) -> None:
         """A model returning ``#Budget`` and ``budget`` has returned one tag,
         and only lowercasing first makes that visible."""

@@ -116,7 +116,8 @@ class OutboxEvent(Base):
 
     Per finding S7 the drain publishes to Redis pub/sub with **no consumer**
     in M1: the outbox is load-bearing for correctness and audit regardless,
-    while SSE waits for M5 and real UI to justify its complexity.
+    while SSE was measured against real UI in M5-10 and rejected (ADR-017).
+    The channel keeps its publish for a consumer that is not a browser.
     """
 
     __tablename__ = "outbox_event"

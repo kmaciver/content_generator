@@ -28,6 +28,7 @@ from videoforge.dto import (
     ArtifactDetail,
     ArtifactSummary,
     BatchReviewResult,
+    BudgetStatus,
     CommentRequest,
     ContactSheet,
     ContactTile,
@@ -47,6 +48,9 @@ from videoforge.services.admission import AdmissionError
 from videoforge.services.jobs import JobService
 from videoforge.services.review import ReviewService, StaleVersionError
 from videoforge_domain.artifact_lifecycle import IllegalTransitionError, capabilities
+from videoforge_persistence.projection import get_pipeline
+from videoforge_persistence.repositories.projects import IDLE
+from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.enums import ArtifactKind, ArtifactState, SubjectType
 from videoforge_shared.settings import AppSettings
 from videoforge_shared.tasks import STAGE_TASKS
@@ -120,7 +124,14 @@ def list_projects() -> tuple[Response, int]:
         if workspace is None:
             return jsonify({"items": []}), 200
         projects = uow.projects.for_workspace(workspace.id, limit=limit, offset=offset)
-        items = [ProjectSummary.of(p).model_dump(mode="json") for p in projects]
+        # One grouped scan for the page, not one per row (M5-08). The list is
+        # polled while anything is running, so an N+1 here would be N+1 every
+        # 1.5 seconds.
+        activity = uow.projects.activity_for([p.id for p in projects])
+        items = [
+            ProjectSummary.of(p, activity.get(p.id, IDLE)).model_dump(mode="json")
+            for p in projects
+        ]
         return jsonify({"items": items}), 200
 
 
@@ -172,6 +183,24 @@ def delete_project(project_id: str) -> tuple[Response, int]:
     return Response(status=204), 204
 
 
+def _budget(uow: UnitOfWork, project_id: str) -> BudgetStatus:
+    """Today's spend against the cap, plus what this project has cost.
+
+    One function, two callers: the project payload renders it, and
+    ``POST /generations`` refuses on it. Assembling it twice would be two
+    chances for the number on the screen to disagree with the rule that
+    blocked the button — which is the whole failure this ticket is fixing, in
+    a different place.
+    """
+    settings: AppSettings = current_app.config["VIDEOFORGE_SETTINGS"]
+    return BudgetStatus.of(
+        uow.usage.spend_today(),
+        settings.core.daily_cost_limit,
+        uow.usage.spend_today_for_project(project_id),
+        currency=settings.core.cost_currency,
+    )
+
+
 @projects_blueprint.get("/projects/<project_id>")
 def get_project(project_id: str) -> tuple[Response, int]:
     with transaction() as uow:
@@ -181,7 +210,10 @@ def get_project(project_id: str) -> tuple[Response, int]:
         artifacts = uow.artifacts.for_project(project_id)
         return _ok(
             ProjectDetail.of_detail(
-                project, artifacts, uow.scenes.for_approved_set(project_id)
+                project,
+                artifacts,
+                uow.scenes.for_approved_set(project_id),
+                _budget(uow, project_id),
             )
         )
 
@@ -196,8 +228,8 @@ def request_generation(project_id: str) -> tuple[Response, int]:
     """202 Accepted with a job id — the async pattern of §19.2.
 
     Long work never happens in a request handler. The response is a receipt,
-    and the client polls ``GET /jobs/{id}`` (ADR-006 commits to polling first;
-    SSE waits for M5 behind a flag).
+    and the client polls ``GET /jobs/{id}`` — permanently, since ADR-017
+    measured SSE in M5-10 and rejected it.
     """
     body = _body(GenerateRequest)
     spec = STAGE_TASKS.get(body.stage)
@@ -212,6 +244,37 @@ def request_generation(project_id: str) -> tuple[Response, int]:
     with transaction() as uow:
         if uow.projects.get(project_id) is None:
             raise ApiError(404, "Not found", f"no project {project_id}")
+
+        # The daily cap, checked before a job exists (M5-07).
+        #
+        # **This is a pre-flight, not the guard.** The cap is enforced at the
+        # provider call site in `videoforge_workers.stages`, which is the only
+        # place that knows a call is genuinely about to be made and the only
+        # place that can stop a fan-out halfway through. Deleting this check
+        # would cost money nowhere; deleting that one would cost money.
+        #
+        # It earns its place by failing *fast and legibly*. Without it, a click
+        # on an exhausted budget returns 202, holds an idempotency key, marks
+        # the artifact GENERATING, then FAILED — the operator waits for a
+        # round trip to a worker to be told a number the API knew before it
+        # answered.
+        #
+        # Free stages are never refused: finishing and downloading a video
+        # already paid for must not depend on today's remaining budget.
+        pipeline = get_pipeline()
+        if pipeline.has_stage(body.stage) and pipeline.stage_for(body.stage).bills:
+            budget = _budget(uow, project_id)
+            if budget.exhausted:
+                raise ApiError(
+                    409,
+                    "Budget exhausted",
+                    f"daily provider spend estimate {budget.spent} "
+                    f"{budget.currency} has reached the limit of "
+                    f"{budget.limit} {budget.currency}; no further paid "
+                    "generations today. Raise DAILY_COST_LIMIT or wait for "
+                    "the day to roll over (UTC).",
+                )
+
         service = JobService(uow, dispatcher())
         try:
             outcome = service.request(
@@ -277,6 +340,10 @@ def get_artifact(artifact_id: str) -> tuple[Response, int]:
             ArtifactDetail.of_detail(
                 artifact,
                 [VersionSummary.of(v, statuses.get(v.id)) for v in versions],
+                # M5-06. One extra indexed lookup on the payload the review
+                # screen already polls, rather than a second endpoint the
+                # screen would have to poll in step with this one.
+                uow.jobs.latest_for_artifact(artifact_id),
             )
         )
 

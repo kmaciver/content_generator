@@ -12,6 +12,14 @@ Durations are your estimate of speaking time at an unhurried pace. They must
 sum to about {{ target_ms }} ms (±{{ tolerance_ms }} ms); the whole script must
 be covered, with nothing left over.
 
+The script is in {{ language }} and the narration you copy stays exactly
+as written — see above; it is the text the voice is synthesised from.
+`card_text` is shown on screen, so it is also in {{ language }}.
+
+**The visual brief is the one exception: write it in English.** It is
+consumed by the image-prompt stage and never seen by an audience, and the
+image models downstream are trained on English captions.
+
 The visual brief describes what to draw — subject, action, framing. It is read
 by an illustrator who has not seen the script.
 

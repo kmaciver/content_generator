@@ -296,6 +296,50 @@ class TestJobReservation:
         # And not twice.
         assert jobs.mark_succeeded(reserved.job.id) is False
 
+    def test_a_job_records_how_long_its_work_actually_took(
+        self, db_session: Session, spine: dict[str, str]
+    ) -> None:
+        """``started_at``/``finished_at`` must bracket the work, not the row.
+
+        **This failed for the entire life of the project and nothing caught
+        it.** Postgres ``now()`` is ``transaction_timestamp()`` — frozen at
+        BEGIN — and ``skeleton.py`` runs the stage body and ``mark_succeeded``
+        inside one transaction, so ``finished_at = now()`` recorded the instant
+        that transaction *began*, before any work happened. Every finished job
+        in the database claimed to have taken about ten milliseconds. Measured
+        against ``provider_usage.latency_ms``, which is timed in Python: an
+        image job whose provider calls took **149.5 seconds** was stored as
+        **0.010 seconds**.
+
+        It stayed invisible because a duration nobody renders cannot look
+        wrong. M5-06 put it on screen ("took 0.0s" under a stage that had run
+        for two minutes) and M5-10 went looking for how long stages take, which
+        is how it surfaced.
+
+        ``pg_sleep`` inside the transaction stands in for the stage body, which
+        is precisely where the real work happens. With ``now()`` this asserts
+        zero; only a wall-clock read passes.
+        """
+        jobs = JobRepository(db_session)
+        reserved = jobs.reserve(
+            project_id=spine["project_id"],
+            task_name="script.generate",
+            queue="llm",
+            idempotency_key="script:duration",
+        )
+        assert jobs.claim(reserved.job.id) is True
+        db_session.execute(sa.text("SELECT pg_sleep(0.3)"))
+        assert jobs.mark_succeeded(reserved.job.id) is True
+
+        db_session.refresh(reserved.job)
+        # Both are nullable on the model — a queued job has neither — and a
+        # SUCCEEDED one must have both, so this is an assertion rather than a
+        # cast to appease the type checker.
+        assert reserved.job.started_at is not None
+        assert reserved.job.finished_at is not None
+        elapsed = reserved.job.finished_at - reserved.job.started_at
+        assert elapsed.total_seconds() >= 0.3
+
     def test_failure_requeues_within_budget(
         self, db_session: Session, spine: dict[str, str]
     ) -> None:

@@ -88,7 +88,14 @@ export interface ArtifactSummary {
 
 export interface ArtifactDetail extends ArtifactSummary {
   versions: VersionSummary[];
+  /** The most recent job that ran against this artifact (M5-06).
+   *
+   * `null` is a normal answer — seeded content has no job row.
+   */
+  job: JobResponse | null;
 }
+
+export type WaitingOn = "human" | "machine" | "nobody";
 
 export interface ProjectSummary {
   id: string;
@@ -96,6 +103,18 @@ export interface ProjectSummary {
   title: string | null;
   phase: string;
   created_at: string;
+  /** Who has to act next (M5-08).
+   *
+   * Deliberately server-derived and NOT inferable from `phase`: a stage's
+   * "generating" phase is reported both while it runs and while it sits
+   * unstarted, so a project waiting on a button press reports `SCRIPTING` and
+   * a client grouping on the phase string would file it under "working".
+   */
+  waiting_on: WaitingOn;
+  /** Something under this project failed. Orthogonal to `waiting_on` and to
+   * `phase` — a failed image among twenty does not move the phase, so without
+   * this the project looks healthy in a list. */
+  has_failures: boolean;
 }
 
 /** One pipeline stage, as the server computes it (M2-13).
@@ -115,6 +134,30 @@ export interface StageSummary {
   /** Not-yet-approved requirements. Empty means runnable. */
   unmet: string[];
   can_generate: boolean;
+  /** Why the stage cannot run for a reason that is not a missing input —
+   * today, only the daily spend cap (M5-07). A complete sentence, composed by
+   * the server, because it carries numbers the client would otherwise have to
+   * reassemble. */
+  blocked_reason: string | null;
+}
+
+/** Today's estimated provider spend against the daily cap (S10, M5-07).
+ *
+ * Money arrives as strings: `unit_cost_estimate` is NUMERIC so a spend cap
+ * cannot drift, and parsing it into a JS number would undo that at the last
+ * hop. These are display values.
+ */
+export interface BudgetStatus {
+  spent: string;
+  limit: string;
+  remaining: string;
+  currency: string;
+  /** This project's share. `spent` is deployment-wide — the cap is a total
+   * across every project — so the two are shown together or neither is. */
+  project_spent: string;
+  exhausted: boolean;
+  /** False when no cap is configured, which means unlimited, not zero. */
+  capped: boolean;
 }
 
 /** A scene of the approved scene set, for the per-scene review selector. */
@@ -262,6 +305,7 @@ export interface ProjectDetail extends ProjectSummary {
   artifacts: ArtifactSummary[];
   stages: StageSummary[];
   scenes: SceneSummary[];
+  budget: BudgetStatus | null;
 }
 
 export interface JobResponse {
@@ -271,7 +315,16 @@ export interface JobResponse {
   queue: string;
   attempt: number;
   max_attempts: number;
+  /** `{type, message, task, duration_ms}` when the worker recorded a failure.
+   *
+   * The worker stores `str(exc)` and never the traceback, so this is safe to
+   * render — see `skeleton.py`, which is deliberate about it because provider
+   * exceptions have been known to carry the request payload.
+   */
   error: Record<string, unknown> | null;
+  queued_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 /** RFC-9457 problem+json — the single error shape the API and BFF both emit. */

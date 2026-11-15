@@ -61,6 +61,23 @@ class Stage:
     #: ``MEDIA_GENERATION``.
     phase_generating: ProjectPhase
     phase_review: ProjectPhase
+    #: Whether running this stage calls a paid provider (M5-07).
+    #:
+    #: Declared rather than inferred from ``queue``, because the queue is a
+    #: *routing* fact and the two disagree: ``thumbnail`` runs on the ``image``
+    #: queue and calls nobody — it composes an already-approved scene image
+    #: with typeset text — while ``caption`` shares the ``llm`` queue with four
+    #: stages that do spend. Deriving cost from routing would block a free
+    #: stage and free a paid one, and moving a task between queues would
+    #: silently change what it costs.
+    #:
+    #: **A hint for the pre-flight, not the guard.** The cap is enforced at the
+    #: provider call site in the worker, where the money is actually about to
+    #: be spent; this flag only lets the API refuse work it can already tell
+    #: will fail, and lets the UI say why. Hence the default of ``False``: a
+    #: new stage that forgets it gets a worse error message, while a wrongly
+    #: ``True`` one would refuse to finish a video already paid for.
+    bills: bool = False
 
 
 class Pipeline:
@@ -184,6 +201,7 @@ def _stage_from_mapping(index: int, raw: Any) -> Stage:
         parallelizable_per_scene=bool(raw.get("parallelizable_per_scene", False)),
         phase_generating=_phase(raw.get("phase_generating"), produces, "generating"),
         phase_review=_phase(raw.get("phase_review"), produces, "review"),
+        bills=bool(raw.get("bills", False)),
     )
 
 

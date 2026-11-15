@@ -14,13 +14,19 @@ import { artifactStateColor, humanise } from "@/lib/state-colors";
 import { ContactSheet } from "./contact-sheet";
 import { SceneSelector } from "./scene-selector";
 import { StageContent } from "./stage-content";
+import { BudgetBar } from "./budget-bar";
+import { JobStatus } from "./job-status";
 import { StageRail } from "./stage-rail";
 import { VersionSwitcher } from "./version-switcher";
 
-// Polling, not SSE. ADR-006 commits to polling first, and finding S7 defers the
-// event consumer to M5 — the outbox and its drain exist, but nothing subscribes
-// yet. 1.5s while a job is in flight, off otherwise: the interval only matters
-// when something is actually moving.
+// Polling, and permanently so: ADR-017 settled finding S7 by measuring it.
+// SSE would remove a mean of 750ms from waits whose median is ~20s and whose
+// heaviest stage is ~129s, at the cost of holding one of the API's eight
+// request slots per open tab — and the interactions that happen at human speed
+// (approve, reject, edit) are mutations that never polled to begin with.
+//
+// 1.5s while a job is in flight, off otherwise: the interval only matters when
+// something is actually moving.
 const POLL_MS = 1500;
 
 /** The project screen (M2-13).
@@ -133,8 +139,18 @@ export function PipelineReview({ projectId }: { projectId: string }) {
   };
 
   const generate = useMutation({
-    mutationFn: ({ kind, regenerate }: { kind: string; regenerate: boolean }) =>
-      api.generate(projectId, kind, regenerate),
+    // `sceneId` is optional and omitted by the rail, which always acts on the
+    // whole stage. The Retry button on a failed *scene* must pass it, or a
+    // reviewer retrying scene 4 would re-run all twenty.
+    mutationFn: ({
+      kind,
+      regenerate,
+      sceneId,
+    }: {
+      kind: string;
+      regenerate: boolean;
+      sceneId?: string;
+    }) => api.generate(projectId, kind, regenerate, sceneId),
     onSuccess: (_data, variables) => {
       setSelectedKind(variables.kind);
       setSelectedVersion(null);
@@ -243,6 +259,10 @@ export function PipelineReview({ projectId }: { projectId: string }) {
 
       {error ? <Failed>{error.message}</Failed> : null}
 
+      {/* Above the rail, because the rail is where money gets spent and this
+          is the number that decides whether a Generate will be honoured. */}
+      <BudgetBar budget={project.data.budget} />
+
       <StageRail
         stages={stages}
         selected={activeKind ?? ""}
@@ -298,6 +318,24 @@ export function PipelineReview({ projectId }: { projectId: string }) {
         <section className="flex flex-col gap-5">
           <StateBadge artifact={artifact.data ?? artifactSummary} />
 
+          {/* Rendered for every state, not only failures (M5-06). A succeeded
+              job saying "llm · took 1.2s" is how someone learns what normal
+              looks like here, which is what makes the four-minute one legible
+              as abnormal. It returns null when there is no job at all. */}
+          <JobStatus
+            job={artifact.data?.job ?? null}
+            canRetry={Boolean(caps?.can_regenerate)}
+            retrying={generate.isPending}
+            onRetry={() =>
+              activeKind &&
+              generate.mutate({
+                kind: activeKind,
+                regenerate: true,
+                sceneId: activeScene ?? undefined,
+              })
+            }
+          />
+
           {artifactSummary.state === "GENERATING" ? (
             // The escape hatch (M5-05), offered *here* because this is the
             // screen someone is looking at when a stage stops moving. Without
@@ -305,7 +343,7 @@ export function PipelineReview({ projectId }: { projectId: string }) {
             // the idempotency key stays held by the parked row, so even
             // Regenerate deduplicates onto it, and the only cure was psql.
             <div className="flex flex-wrap items-center gap-3">
-              <Muted>Generating… this page updates itself.</Muted>
+              <Muted>This page updates itself.</Muted>
               <button
                 type="button"
                 data-testid="release-stage"

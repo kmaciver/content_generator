@@ -29,6 +29,7 @@ from videoforge_shared.tasks import SCENES_GENERATE
 from videoforge_workers.skeleton import JobContext, videoforge_task
 from videoforge_workers.stages import (
     complete_generation,
+    content_language,
     llm_complete,
     load_artifact,
     require_approved_content,
@@ -85,6 +86,7 @@ def scenes_body(ctx: JobContext) -> None:
         script=str(script.get("script", "")),
         target_ms=target_ms,
         tolerance_ms=duration_tolerance_ms(target_ms),
+        language=content_language().name,
     )
     result = llm_complete(ctx, prompt, _RESPONSE_SCHEMA)
 
