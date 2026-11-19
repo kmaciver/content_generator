@@ -21,6 +21,7 @@ from functools import lru_cache
 
 from videoforge_domain.phases import derive_phase
 from videoforge_domain.pipeline import Pipeline
+from videoforge_persistence.models import Artifact
 from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.enums import (
     ArtifactKind,
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "cascade_staleness",
     "get_pipeline",
+    "live_artifacts",
     "recompute_phase",
     "refresh_project_state",
 ]
@@ -51,6 +53,30 @@ def get_pipeline() -> Pipeline:
     of cross-test coupling.
     """
     return Pipeline.from_mapping(load_pipeline_mapping())
+
+
+def live_artifacts(uow: UnitOfWork, project_id: str) -> list[Artifact]:
+    """The project's artifacts, minus per-scene ones for scenes that are gone.
+
+    Regenerating scenes leaves the old scenes' prompts and images behind,
+    pointing at a scene-set version that is no longer approved. They stay as
+    history, but they must not count: the contact sheet shows only the
+    approved set's scenes, so an old image left AWAITING_APPROVAL held the
+    image stage with nothing on screen to approve.
+
+    **Every least-advanced-wins rollup reads this**, never ``for_project``
+    directly — phase, admission, and the stage summaries have to agree.
+
+    With no approved scene set nothing is filtered: there is no "current"
+    to measure against, and dropping every per-scene row would report an
+    in-progress stage as absent.
+    """
+    artifacts = uow.artifacts.for_project(project_id)
+    scenes = uow.scenes.for_approved_set(project_id)
+    if not scenes:
+        return artifacts
+    current = {scene.id for scene in scenes}
+    return [a for a in artifacts if a.scene_ref is None or a.scene_ref in current]
 
 
 def _states(uow: UnitOfWork, project_id: str) -> dict[ArtifactKind, ArtifactState]:
@@ -70,7 +96,7 @@ def _states(uow: UnitOfWork, project_id: str) -> dict[ArtifactKind, ArtifactStat
         ArtifactState.APPROVED: 5,
     }
     worst: dict[ArtifactKind, ArtifactState] = {}
-    for artifact in uow.artifacts.for_project(project_id):
+    for artifact in live_artifacts(uow, project_id):
         kind = ArtifactKind(artifact.kind)
         state = ArtifactState(artifact.state)
         current = worst.get(kind)

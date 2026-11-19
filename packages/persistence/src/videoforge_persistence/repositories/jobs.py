@@ -130,6 +130,7 @@ class JobRepository(Repository):
         idempotency_key: str,
         project_id: str | None = None,
         series_id: str | None = None,
+        studio_generation_id: str | None = None,
         artifact_id: str | None = None,
         input_snapshot: dict[str, Any] | None = None,
         max_attempts: int = 3,
@@ -153,16 +154,22 @@ class JobRepository(Repository):
         # too rather than left to the constraint: an IntegrityError at flush
         # names the constraint, not the call site that got it wrong, and this
         # is a programming error rather than a data one.
-        if (project_id is None) == (series_id is None):
+        scopes = {
+            "project_id": project_id,
+            "series_id": series_id,
+            "studio_generation_id": studio_generation_id,
+        }
+        if sum(value is not None for value in scopes.values()) != 1:
             raise ValueError(
-                "a job needs exactly one of project_id or series_id; "
-                f"got project_id={project_id!r}, series_id={series_id!r}"
+                "a job needs exactly one of project_id, series_id or "
+                f"studio_generation_id; got {scopes!r}"
             )
 
         values = {
             "id": new_ulid(),
             "project_id": project_id,
             "series_id": series_id,
+            "studio_generation_id": studio_generation_id,
             "artifact_id": artifact_id,
             "task_name": task_name,
             "queue": queue,

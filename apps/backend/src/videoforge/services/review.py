@@ -22,6 +22,8 @@ from videoforge_domain.artifact_lifecycle import (
     Transition,
     apply_event,
 )
+from videoforge_domain.post_copy import validate_edited_caption
+from videoforge_domain.voice_direction import SceneText, validate_direction
 from videoforge_persistence.models import Artifact, ArtifactVersion
 from videoforge_persistence.projection import refresh_project_state
 from videoforge_persistence.uow import UnitOfWork
@@ -254,6 +256,21 @@ class ReviewService:
         transition = apply_event(
             ArtifactState(artifact.state), ArtifactEvent.HUMAN_EDITED
         )
+        if ArtifactKind(artifact.kind) is ArtifactKind.CAPTION:
+            # Validated rather than trimmed, and derived fields recomputed:
+            # the reviewer approves exactly the words they typed, and the
+            # "before more" preview describes *this* caption, not the one the
+            # model wrote. Raises InvalidCopyError -> 422.
+            content = validate_edited_caption(dict(content))
+        elif ArtifactKind(artifact.kind) is ArtifactKind.VOICE_DIRECTION:
+            # ADR-019. Checked against the *approved* scene set, and the words
+            # always come from the scenes rather than the request: a reviewer
+            # moves tags, never narration. Raises InvalidDirectionError -> 422.
+            scenes = [
+                SceneText(scene.id, scene.index, scene.narration_text.strip())
+                for scene in self._uow.scenes.for_approved_set(artifact.project_id)
+            ]
+            content = validate_direction(dict(content), scenes)
         canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
         version = self._uow.versions.add_version(
             artifact,

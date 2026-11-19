@@ -26,6 +26,7 @@ __all__ = [
     "DRAIN_OUTBOX",
     "IMAGES_GENERATE",
     "PACKAGE_ASSEMBLE",
+    "VOICE_DIRECTION_GENERATE",
     "VOICE_GENERATE",
     "PING",
     "PROMPTS_GENERATE",
@@ -33,6 +34,7 @@ __all__ = [
     "REFERENCES_GENERATE",
     "RESEARCH_GENERATE",
     "SCENES_GENERATE",
+    "STUDIO_GENERATE",
     "RENDER_GENERATE",
     "RENDER_HELLO",
     "SCRIPT_GENERATE",
@@ -68,6 +70,10 @@ PROMPTS_GENERATE = TaskSpec("prompts.generate", "llm")
 #: concurrency limit that stops a slow, expensive modality starving the cheap
 #: ones (§14.1).
 IMAGES_GENERATE = TaskSpec("image.generate", "image")
+
+#: ADR-019. One short completion that suggests emotion tags for the whole
+#: narration, so it lives with the other text stages on ``llm``.
+VOICE_DIRECTION_GENERATE = TaskSpec("voice_direction.generate", "llm")
 
 #: M3-12. **Not** per-scene, unlike images: B3 revised requires one synthesis
 #: call for the whole script, because twenty sentences read in isolation
@@ -111,6 +117,7 @@ STAGE_TASKS: dict[ArtifactKind, TaskSpec] = {
     ArtifactKind.SCENE_SET: SCENES_GENERATE,
     ArtifactKind.PROMPT: PROMPTS_GENERATE,
     ArtifactKind.IMAGE: IMAGES_GENERATE,
+    ArtifactKind.VOICE_DIRECTION: VOICE_DIRECTION_GENERATE,
     ArtifactKind.VOICE: VOICE_GENERATE,
     ArtifactKind.TIMELINE: TIMELINE_COMPILE,
     ArtifactKind.RENDER: RENDER_GENERATE,
@@ -123,6 +130,10 @@ STAGE_TASKS: dict[ArtifactKind, TaskSpec] = {
 #: generation and must share the concurrency limit that keeps a slow, expensive
 #: modality from starving the cheap ones (§14.1).
 REFERENCES_GENERATE = TaskSpec("references.generate", "image")
+
+#: Image Studio (ADR-018): free-form images outside any project or series. Same
+#: queue as every other image job, for the same concurrency reason.
+STUDIO_GENERATE = TaskSpec("studio.generate", "image")
 
 #: Infrastructure tasks.
 DRAIN_OUTBOX = TaskSpec("outbox.drain", "events")

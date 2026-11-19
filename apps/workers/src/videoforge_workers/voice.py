@@ -19,6 +19,11 @@ renderer and the review player need is in ``meta``: the per-scene spans, and
 the per-word timings inside each. M4's timeline compiler turns those into a
 concat list and an ASS caption file; nothing further needs the provider.
 
+**Emotion tags (ADR-019).** The text sent is the narration with the approved
+voice direction's tags inserted — ``[whispers] Nobody knew…`` — and the tags
+are removed from the returned alignment *before* words are grouped, so captions
+and scene spans see exactly the clean narration they always did.
+
 **What it gives up, explicitly.** Surgical per-scene retakes. §17's
 "per-segment retake" becomes a comment anchored to a scene that regenerates the
 *whole* voice artifact — acceptable, because that is one cheap call, and the
@@ -30,10 +35,17 @@ from __future__ import annotations
 import logging
 
 from videoforge_domain.timing import scene_spans, words_from_characters
+from videoforge_domain.voice_direction import (
+    InvalidDirectionError,
+    SceneText,
+    compose,
+    directed_scenes,
+    strip_tag_characters,
+)
 from videoforge_providers.models import VoiceRequest
 from videoforge_providers.protocols import VoiceProvider
 from videoforge_providers.registry import build_voice_provider
-from videoforge_shared.enums import SceneKind
+from videoforge_shared.enums import ArtifactKind, SceneKind
 from videoforge_shared.settings import load_worker_settings
 from videoforge_shared.storage import StorageClient, storage_client_from_settings
 from videoforge_shared.tasks import VOICE_GENERATE
@@ -42,6 +54,7 @@ from videoforge_workers.stages import (
     complete_stored_generation,
     content_language,
     load_artifact,
+    require_approved_content,
     require_budget,
 )
 
@@ -64,13 +77,41 @@ def voice_body(ctx: JobContext) -> None:
     # rather than a matching one. Joined here, once, so the text sent and the
     # text the boundaries are derived against cannot diverge.
     narrations = [scene.narration_text.strip() for scene in scenes]
-    script = " ".join(narrations)
+
+    # ADR-019: the approved direction, re-checked against these exact scenes.
+    # A direction approved before the scene set moved on would put tags on the
+    # wrong sentences, so it fails here rather than being half-applied.
+    direction = require_approved_content(ctx, project_id, ArtifactKind.VOICE_DIRECTION)
+    try:
+        directed = directed_scenes(
+            direction,
+            [
+                SceneText(scene.id, scene.index, narration)
+                for scene, narration in zip(scenes, narrations, strict=True)
+            ],
+        )
+    except InvalidDirectionError as exc:
+        raise RuntimeError(
+            f"the approved voice direction does not fit the approved scenes: {exc}"
+        ) from exc
+    composed = compose(directed)
+
+    provider = _provider()
+    limit = provider.capabilities().max_characters
+    if limit and len(composed.text) > limit:
+        # Refused before spending. B3 requires one synthesis for the whole
+        # script, so splitting is not an option — the script is too long for
+        # this model, and the fix is upstream.
+        raise RuntimeError(
+            f"the narration is {len(composed.text)} characters with tags; the "
+            f"voice model accepts {limit} in one call"
+        )
 
     require_budget(ctx)
     settings = load_worker_settings()
-    result = _provider().synthesise(
+    result = provider.synthesise(
         VoiceRequest(
-            text=script,
+            text=composed.text,
             voice_id=settings.providers.voice.voice_id,
             # The *voice* still has to be one that speaks this language —
             # `language_code` tells the model which language the text is, not
@@ -85,9 +126,19 @@ def voice_body(ctx: JobContext) -> None:
     # a bare numeral as its own frame, and a probe on 2026-08-09 put `762` at
     # 0.743-1.533s as one written token; the normalised stream would make it
     # four words nobody wrote. The adapter only ever returns the written one.
-    words = words_from_characters(
-        result.characters, result.character_starts_s, result.character_ends_s
+    characters, starts, ends, strip_method = strip_tag_characters(
+        composed,
+        result.characters,
+        result.character_starts_s,
+        result.character_ends_s,
     )
+    if strip_method == "bracket_scan":
+        logger.warning(
+            "voice alignment was not one-to-one with the request; tags were "
+            "removed by scanning for brackets (ADR-019)",
+            extra={"project_id": project_id},
+        )
+    words = words_from_characters(characters, starts, ends)
     spans = scene_spans(words, narrations)
 
     # Loud rather than silent. A scene with no words is one the renderer would
@@ -119,6 +170,10 @@ def voice_body(ctx: JobContext) -> None:
             "duration_ms": result.duration_ms,
             "word_count": len(words),
             "scene_count": len(scenes),
+            # ADR-019. How many tags were performed, and how they were taken
+            # back out of the timings — evidence if captions ever drift.
+            "tag_count": composed.tag_count,
+            "tag_strip_method": strip_method,
             # Everything M4 needs, and everything the review player needs.
             # Stored rather than re-derived: the derivation is deterministic,
             # but re-running it later against a different build's grouping

@@ -40,6 +40,7 @@ from videoforge_persistence.repositories.reviews import (
     ReviewRepository,
 )
 from videoforge_persistence.repositories.scenes import SceneRepository
+from videoforge_persistence.repositories.studio import StudioEntry, StudioRepository
 
 __all__ = [
     "ArtifactRepository",
@@ -56,6 +57,8 @@ __all__ = [
     "ReservedJob",
     "ReviewRepository",
     "SeriesRepository",
+    "StudioEntry",
+    "StudioRepository",
     "VersionStatusRow",
     "WorkspaceRepository",
 ]

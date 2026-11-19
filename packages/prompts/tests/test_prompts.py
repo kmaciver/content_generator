@@ -240,6 +240,13 @@ def _context_for(name: str) -> dict[str, object]:
             "script": "The moon pulls the water toward it.",
             "language": "English",
         },
+        "voice_direction": {
+            "topic": "tides",
+            "language": "English",
+            "tags": ("excited", "whispers"),
+            "max_per_scene": 2,
+            "scenes": [{"index": 1, "narration": "The moon pulls."}],
+        },
         "scenes": {
             "title": "Tides",
             "script": "The moon pulls.",

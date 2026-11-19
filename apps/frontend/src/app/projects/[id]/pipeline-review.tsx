@@ -11,13 +11,24 @@ import {
   type RejectionReason,
 } from "@/lib/api";
 import { artifactStateColor, humanise } from "@/lib/state-colors";
+import { ApproveAllBar } from "./approve-all";
 import { ContactSheet } from "./contact-sheet";
+import {
+  CaptionEditor,
+  CoverTextEditor,
+  captionDraftProblem,
+  coverDraftProblem,
+  formatHashtags,
+  parseHashtags,
+  type Draft,
+} from "./copy-editors";
 import { SceneSelector } from "./scene-selector";
 import { StageContent } from "./stage-content";
 import { BudgetBar } from "./budget-bar";
 import { JobStatus } from "./job-status";
 import { StageRail } from "./stage-rail";
 import { VersionSwitcher } from "./version-switcher";
+import { VoiceDirectionEditor, directionScenes } from "./voice-direction";
 
 // Polling, and permanently so: ADR-017 settled finding S7 by measuring it.
 // SSE would remove a mean of 750ms from waits whose median is ~20s and whose
@@ -59,7 +70,7 @@ export function PipelineReview({ projectId }: { projectId: string }) {
     id: string;
   } | null>(null);
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
-  const [draft, setDraft] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [comment, setComment] = useState("");
   // Cleared on every decision: reasons describe *this* version, and carrying
   // them to the next one would attribute a complaint nobody made.
@@ -146,14 +157,17 @@ export function PipelineReview({ projectId }: { projectId: string }) {
       kind,
       regenerate,
       sceneId,
+      coverText,
     }: {
       kind: string;
       regenerate: boolean;
       sceneId?: string;
-    }) => api.generate(projectId, kind, regenerate, sceneId),
+      coverText?: string;
+    }) => api.generate(projectId, kind, regenerate, sceneId, coverText),
     onSuccess: (_data, variables) => {
       setSelectedKind(variables.kind);
       setSelectedVersion(null);
+      setDraft(null);
       invalidate();
     },
   });
@@ -183,36 +197,84 @@ export function PipelineReview({ projectId }: { projectId: string }) {
     },
   });
 
-  // Which single text field this stage's editor writes to.
-  //
-  // Derived from the content shape rather than keyed on kind, which is what
-  // let `caption` (M5-01) become editable without touching this rule — and it
-  // had to, because the caption is the one artifact here that is *published*
-  // verbatim and so the one people will most often want to reword.
-  //
-  // Deliberately one field. A caption's hook and hashtags are editable only by
-  // regenerating today; giving each its own input is a real editor and a
-  // different ticket, and pretending a textarea covers them would silently
-  // drop two of the three things a reviewer came to change.
-  const editableField =
+  // Which editor this stage gets, derived from the content shape (script,
+  // caption) or the kind (thumbnail, whose content is a picture). The caption
+  // editor covers all three fields a reviewer comes to change — hook, text and
+  // hashtags — and the cover editor re-renders the thumbnail with typed text.
+  const editorKind: Draft["type"] | null =
     detail.data?.content?.script !== undefined
       ? "script"
       : detail.data?.content?.caption !== undefined
         ? "caption"
-        : null;
+        : activeKind === "thumbnail" && activeScene === null
+          ? "thumbnail"
+          : activeKind === "voice_direction"
+            ? "voice_direction"
+            : null;
+
+  const startEdit = (): Draft | null => {
+    const content = detail.data?.content ?? {};
+    if (editorKind === "script") {
+      return { type: "script", text: String(content.script ?? "") };
+    }
+    if (editorKind === "caption") {
+      return {
+        type: "caption",
+        hook: String(content.hook ?? ""),
+        caption: String(content.caption ?? ""),
+        hashtags: formatHashtags(content.hashtags),
+      };
+    }
+    if (editorKind === "thumbnail") {
+      return { type: "thumbnail", text: String(detail.data?.meta?.hook ?? "") };
+    }
+    if (editorKind === "voice_direction") {
+      return { type: "voice_direction", scenes: directionScenes(content) };
+    }
+    return null;
+  };
 
   const saveEdit = useMutation({
-    mutationFn: (text: string) =>
-      api.edit(artifactSummary!.id, {
-        ...(detail.data?.content ?? {}),
-        [editableField ?? "script"]: text,
-      }),
+    mutationFn: async (d: Draft): Promise<unknown> => {
+      if (d.type === "thumbnail") {
+        // A cover is a picture, so "editing" it is a re-render with the typed
+        // words — a new version that lands in review like any other.
+        return api.generate(projectId, "thumbnail", true, undefined, d.text);
+      }
+      const content = detail.data?.content ?? {};
+      if (d.type === "voice_direction") {
+        // Only the positions travel; the server re-reads the words from the
+        // approved scene set, so a stale narration here cannot be saved.
+        return api.edit(artifactSummary!.id, {
+          ...content,
+          scenes: d.scenes.map((s) => ({ scene_id: s.scene_id, tags: s.tags })),
+        });
+      }
+      return api.edit(
+        artifactSummary!.id,
+        d.type === "script"
+          ? { ...content, script: d.text }
+          : {
+              ...content,
+              hook: d.hook,
+              caption: d.caption,
+              hashtags: parseHashtags(d.hashtags),
+            },
+      );
+    },
     onSuccess: () => {
       setDraft(null);
       setSelectedVersion(null);
       invalidate();
     },
   });
+
+  const draftProblem =
+    draft?.type === "caption"
+      ? captionDraftProblem(draft)
+      : draft?.type === "thumbnail"
+        ? coverDraftProblem(draft)
+        : null;
 
   if (project.isPending) {
     return <Muted>Loading project…</Muted>;
@@ -279,6 +341,25 @@ export function PipelineReview({ projectId }: { projectId: string }) {
         onGenerate={(kind, regenerate) => generate.mutate({ kind, regenerate })}
         busy={busy}
       />
+
+      {/* Per-scene stages only, and not over the image grid, which carries
+          the same button itself. */}
+      {activeKind &&
+      project.data.artifacts.some(
+        (a) => a.kind === activeKind && a.scene_ref !== null,
+      ) &&
+      !(activeKind === "image" && activeScene === null) ? (
+        <ApproveAllBar
+          key={activeKind}
+          projectId={projectId}
+          kind={activeKind}
+          stateKey={project.data.artifacts
+            .filter((a) => a.kind === activeKind && a.scene_ref !== null)
+            .map((a) => a.state)
+            .join(",")}
+          onDone={invalidate}
+        />
+      ) : null}
 
       <SceneSelector
         scenes={project.data.scenes}
@@ -391,19 +472,7 @@ export function PipelineReview({ projectId }: { projectId: string }) {
                   captionCues={detail.data.caption_cues}
                 />
               ) : (
-                <textarea
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  rows={12}
-                  // Labelled by the field it edits, not "Script": the e2e
-                  // finds this control by label, and a caption editor calling
-                  // itself Script is a lie to a screen reader as well.
-                  aria-label={
-                    editableField === "caption" ? "Caption" : "Script"
-                  }
-                  className="w-full resize-y bg-transparent outline-none"
-                  style={{ color: "var(--color-ink)" }}
-                />
+                <DraftEditor draft={draft} onChange={setDraft} />
               )}
             </article>
           ) : null}
@@ -513,24 +582,29 @@ export function PipelineReview({ projectId }: { projectId: string }) {
                     Boolean(caps?.can_edit) &&
                     !busy &&
                     Boolean(detail.data) &&
-                    editableField !== null
+                    editorKind !== null &&
+                    // A cover edit is a re-render, so it needs the right to
+                    // regenerate rather than the right to write content.
+                    (editorKind === "thumbnail"
+                      ? Boolean(caps?.can_regenerate)
+                      : true)
                   }
                   tone="var(--color-ink-muted)"
-                  onClick={() =>
-                    setDraft(
-                      String(
-                        detail.data?.content?.[editableField ?? "script"] ?? "",
-                      ),
-                    )
-                  }
+                  onClick={() => setDraft(startEdit())}
                 />
               </div>
             </>
           ) : (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Action
-                label={saveEdit.isPending ? "Saving…" : "Save as new version"}
-                enabled={!busy}
+                label={
+                  saveEdit.isPending
+                    ? "Saving…"
+                    : draft.type === "thumbnail"
+                      ? "Re-render cover"
+                      : "Save as new version"
+                }
+                enabled={!busy && draftProblem === null}
                 tone="var(--color-state-ok)"
                 onClick={() => saveEdit.mutate(draft)}
               />
@@ -540,6 +614,21 @@ export function PipelineReview({ projectId }: { projectId: string }) {
                 tone="var(--color-ink-muted)"
                 onClick={() => setDraft(null)}
               />
+              {draftProblem ? (
+                <span
+                  className="text-xs"
+                  style={{ color: "var(--color-state-failed)" }}
+                >
+                  {draftProblem}
+                </span>
+              ) : (
+                <span
+                  className="text-xs"
+                  style={{ color: "var(--color-ink-muted)" }}
+                >
+                  Saved as a new version; approving it publishes exactly this.
+                </span>
+              )}
             </div>
           )}
         </section>
@@ -613,5 +702,38 @@ function Failed({ children }: { children: React.ReactNode }) {
     <p className="text-sm" style={{ color: "var(--color-state-failed)" }}>
       {children}
     </p>
+  );
+}
+
+function DraftEditor({
+  draft,
+  onChange,
+}: {
+  draft: Draft;
+  onChange: (draft: Draft) => void;
+}) {
+  if (draft.type === "caption") {
+    return <CaptionEditor draft={draft} onChange={onChange} />;
+  }
+  if (draft.type === "thumbnail") {
+    return <CoverTextEditor draft={draft} onChange={onChange} />;
+  }
+  if (draft.type === "voice_direction") {
+    return (
+      <VoiceDirectionEditor
+        scenes={draft.scenes}
+        onChange={(scenes) => onChange({ ...draft, scenes })}
+      />
+    );
+  }
+  return (
+    <textarea
+      value={draft.text}
+      onChange={(event) => onChange({ ...draft, text: event.target.value })}
+      rows={12}
+      aria-label="Script"
+      className="w-full resize-y bg-transparent outline-none"
+      style={{ color: "var(--color-ink)" }}
+    />
   );
 }

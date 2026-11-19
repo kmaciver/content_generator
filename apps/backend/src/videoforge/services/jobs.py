@@ -306,6 +306,55 @@ class JobService:
         self._pending.append((spec, {"job_id": reserved.job.id}))
         return reserved
 
+    def request_studio_job(
+        self,
+        *,
+        generation_id: str,
+        spec: TaskSpec,
+        actor_id: str | None = None,
+    ) -> ReservedJob:
+        """Reserve the job for one Image Studio request (ADR-018).
+
+        The series method's shape again, scoped to a studio generation: no
+        artifact, no pipeline admission, no phase — but idempotency, the audit
+        trail, orphan recovery and above all ``provider_usage`` metering, which
+        is what keeps studio spend inside the daily cap.
+
+        Keyed on the generation id, which the API mints per request. So a
+        redelivered message is one job, while two submissions of the same
+        prompt are two requests — a person asking twice usually wants two
+        different pictures.
+        """
+        uow = self._uow
+        key = f"{spec.name}:studio:{generation_id}"
+        reserved = uow.jobs.reserve(
+            studio_generation_id=generation_id,
+            task_name=spec.name,
+            queue=spec.queue,
+            idempotency_key=key,
+            input_snapshot={"generation_id": generation_id},
+        )
+        if not reserved.created:
+            return reserved
+
+        uow.audit.record_event(
+            event_type="job.requested",
+            subject_type=SubjectType.JOB,
+            subject_id=reserved.job.id,
+            actor_id=actor_id,
+            payload={
+                "task": spec.name,
+                "queue": spec.queue,
+                "studio_generation_id": generation_id,
+            },
+        )
+        uow.outbox.enqueue(
+            event_type="job.requested",
+            payload={"job_id": reserved.job.id, "studio_generation_id": generation_id},
+        )
+        self._pending.append((spec, {"job_id": reserved.job.id}))
+        return reserved
+
     def dispatch_pending(self) -> None:
         """Publish the messages queued by :meth:`request`. **Call after commit.**
 

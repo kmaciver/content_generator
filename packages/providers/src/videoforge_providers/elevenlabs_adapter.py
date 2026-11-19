@@ -41,18 +41,36 @@ from videoforge_providers.models import (
 
 __all__ = ["DEFAULT_MODEL", "ElevenLabsVoiceProvider"]
 
-#: Chosen by the operator on 2026-08-09 and verified on the same day: it
-#: answers ``/with-timestamps`` with the identical alignment shape as
-#: ``eleven_multilingual_v2``, for less money and lower latency.
-DEFAULT_MODEL = "eleven_turbo_v2_5"
+#: ADR-019. ``eleven_v3`` because it is the model that performs inline audio
+#: tags (``[whispers]``, ``[excited]``); the v2 models read them aloud or ignore
+#: them. ``eleven_turbo_v2_5`` was the default from 2026-08-09 (cheaper, lower
+#: latency, same alignment shape) and remains selectable via ``model``.
+#:
+#: **Verified 2026-11-18** with ``scripts/elevenlabs-v3-probe.py``: v3's
+#: ``/with-timestamps`` returns the written alignment one-to-one with a tagged
+#: request (tags included), and it accepts ``language_code``. The voice stage
+#: still records which tag-stripping path it took, in case that changes.
+DEFAULT_MODEL = "eleven_v3"
 
 _BASE = "https://api.elevenlabs.io/v1"
 
-#: The documented ceiling for a single request on the turbo models. Declared so
-#: the gate can refuse a script too long for one call — B3 requires the whole
-#: narration in one synthesis, so silently splitting would give back exactly the
+#: The ceiling for a single request, per model. Declared so the voice stage can
+#: refuse a script too long for one call — B3 requires the whole narration in
+#: one synthesis, so silently splitting would give back exactly the
 #: concatenated-monotone audio that finding exists to prevent.
-_MAX_CHARACTERS = 40_000
+#:
+#: v3's is far lower than turbo's. 5,000 is the documented limit and is
+#: **verified** (probe, 2026-11-18): 3,000 characters returned 200 in 83 s and
+#: 5,000 in 122 s, both inside the voice request's 300 s
+#: (``VoiceRequest.timeout_s``). Synthesis time grows with length, so raising
+#: that timeout has to come before raising this. A 90-second Reel is ~1,500
+#: characters with tags.
+_MAX_CHARACTERS: dict[str, int] = {
+    "eleven_v3": 5_000,
+    "eleven_turbo_v2_5": 40_000,
+    "eleven_multilingual_v2": 10_000,
+}
+_DEFAULT_MAX_CHARACTERS = 5_000
 
 
 class ElevenLabsVoiceProvider:
@@ -84,7 +102,7 @@ class ElevenLabsVoiceProvider:
         return VoiceCaps(
             word_timings=True,
             mime_type="audio/mpeg",
-            max_characters=_MAX_CHARACTERS,
+            max_characters=_MAX_CHARACTERS.get(self._model, _DEFAULT_MAX_CHARACTERS),
         )
 
     def synthesise(self, req: VoiceRequest) -> VoiceResult:
@@ -180,6 +198,7 @@ class ElevenLabsVoiceProvider:
 #: as the image prices — it exists so the S10 daily cap sees a non-zero number,
 #: not so anyone can reconcile a bill from it.
 _PER_CHARACTER_USD: dict[str, float] = {
+    "eleven_v3": 0.00006,
     "eleven_turbo_v2_5": 0.00003,
     "eleven_multilingual_v2": 0.00006,
 }

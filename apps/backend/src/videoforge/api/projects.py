@@ -17,6 +17,7 @@ Two rules visible throughout:
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from flask import Blueprint, Response, current_app, jsonify, request
 from pydantic import BaseModel, ValidationError
@@ -48,7 +49,9 @@ from videoforge.services.admission import AdmissionError
 from videoforge.services.jobs import JobService
 from videoforge.services.review import ReviewService, StaleVersionError
 from videoforge_domain.artifact_lifecycle import IllegalTransitionError, capabilities
-from videoforge_persistence.projection import get_pipeline
+from videoforge_domain.post_copy import InvalidCopyError
+from videoforge_domain.voice_direction import InvalidDirectionError
+from videoforge_persistence.projection import get_pipeline, live_artifacts
 from videoforge_persistence.repositories.projects import IDLE
 from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.enums import ArtifactKind, ArtifactState, SubjectType
@@ -74,6 +77,22 @@ def _body[T: BaseModel](model: type[T]) -> T:
         return model.model_validate(payload)
     except ValidationError as exc:
         raise ApiError(400, "Invalid request", _first_error(exc)) from exc
+
+
+def _input_extra(body: GenerateRequest) -> dict[str, Any] | None:
+    """Stage-specific inputs carried into the job's ``input_snapshot``."""
+    extra: dict[str, Any] = {}
+    if body.max_scenes:
+        extra["max_scenes"] = body.max_scenes
+    if body.cover_text is not None:
+        if body.stage is not ArtifactKind.THUMBNAIL:
+            raise ApiError(
+                400, "Invalid request", "cover_text only applies to the thumbnail"
+            )
+        # Recorded on the job, so the version's provenance says the words
+        # were typed by a reviewer rather than taken from the caption.
+        extra["cover_text"] = body.cover_text.strip()
+    return extra or None
 
 
 def _first_error(exc: ValidationError) -> str:
@@ -207,7 +226,9 @@ def get_project(project_id: str) -> tuple[Response, int]:
         project = uow.projects.get(project_id)
         if project is None:
             raise ApiError(404, "Not found", f"no project {project_id}")
-        artifacts = uow.artifacts.for_project(project_id)
+        # Live, not `for_project`: the stage rollup must not count the
+        # artifacts of a replaced scene set (see `live_artifacts`).
+        artifacts = live_artifacts(uow, project_id)
         return _ok(
             ProjectDetail.of_detail(
                 project,
@@ -283,9 +304,7 @@ def request_generation(project_id: str) -> tuple[Response, int]:
                 spec=spec,
                 scene_ref=body.scene_id,
                 regenerate=body.regenerate,
-                input_extra=(
-                    {"max_scenes": body.max_scenes} if body.max_scenes else None
-                ),
+                input_extra=_input_extra(body),
             )
         except AdmissionError as exc:
             # The stage's inputs are not approved, or the project has no
@@ -425,6 +444,10 @@ def edit_content(artifact_id: str) -> tuple[Response, int]:
             raise ApiError(404, "Not found", str(exc)) from exc
         except IllegalTransitionError as exc:
             raise ApiError(409, "Conflict", str(exc)) from exc
+        except (InvalidCopyError, InvalidDirectionError) as exc:
+            # Refused, not rewritten: the reviewer should approve exactly what
+            # they typed, so a limit the platform enforces is reported back.
+            raise ApiError(422, "Invalid content", str(exc)) from exc
         uow.flush()
         return _ok(
             VersionDetail.of_detail(

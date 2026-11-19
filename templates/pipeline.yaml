@@ -60,7 +60,7 @@ stages:
     phase_review: SCENES_REVIEW
 
   # image and voice both descend from scene_set and neither depends on the
-  # other, which is the concurrency ADR-009 exists to express: they run in
+  # other (voice also waits on voice_direction, below), which is the concurrency ADR-009 exists to express: they run in
   # parallel and roughly halve wall-clock time per video.
   - produces: image
     requires: [prompt]
@@ -70,12 +70,26 @@ stages:
     phase_generating: MEDIA_GENERATION
     phase_review: MEDIA_REVIEW
 
+  # ADR-019. Emotion tags (`[whispers]`, `[excited]`) for eleven_v3, as word
+  # positions over the approved narration. An LLM suggests them; a reviewer
+  # moves, adds or removes them; approval releases the voice stage.
+  #
+  # Its own stage so a tag edit stales the narration and nothing else: it
+  # descends from scene_set, and only `voice` descends from it. Shares the
+  # scene phases with `prompt` — it is reviewed alongside the scenes it tags.
+  - produces: voice_direction
+    requires: [scene_set]
+    queue: llm
+    bills: true
+    phase_generating: SCENING
+    phase_review: SCENES_REVIEW
+
   # NOT per-scene, deliberately (finding B3 revised, §13): one synthesis call
   # for the whole script, with word timestamps, and scene boundaries recovered
   # by walking the word list. Twenty isolated reads concatenate into a list,
   # not a narration.
   - produces: voice
-    requires: [scene_set]
+    requires: [scene_set, voice_direction]
     queue: voice
     bills: true
     phase_generating: MEDIA_GENERATION

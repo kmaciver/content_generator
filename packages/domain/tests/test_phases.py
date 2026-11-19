@@ -110,6 +110,7 @@ class TestHasFailures:
             script=APPROVED,
             scene_set=APPROVED,
             prompt=APPROVED,
+            voice_direction=APPROVED,
             voice=APPROVED,
             image=ArtifactState.FAILED,
         )

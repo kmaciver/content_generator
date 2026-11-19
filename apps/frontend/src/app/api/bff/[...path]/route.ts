@@ -35,6 +35,8 @@ const ALLOWED_PREFIXES = [
   "series",
   "characters",
   "styles",
+  // Image Studio (ADR-018): free-form images, no series or project.
+  "studio",
 ] as const;
 
 function isAllowed(segments: string[]): boolean {

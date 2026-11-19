@@ -55,7 +55,19 @@ _VIDEO_PATH = "video.mp4"
 _COVER_PATH = "cover.png"
 _CAPTION_PATH = "caption.txt"
 _HASHTAGS_PATH = "hashtags.txt"
+#: Caption, a blank line, then the hashtags on one line — the whole Instagram
+#: caption box in one copy. The two files above stay for anyone who wants the
+#: parts separately.
+_POST_PATH = "post.txt"
 _SCENES_DIR = "scenes"
+
+
+def post_text(caption: dict[str, object]) -> str:
+    """What to paste into Instagram's caption box, ready as-is."""
+    text = str(caption.get("caption") or "").strip()
+    raw = caption.get("hashtags")
+    tags = " ".join(f"#{tag}" for tag in raw) if isinstance(raw, list) else ""
+    return f"{text}\n\n{tags}\n" if tags else f"{text}\n"
 
 
 def assemble_body(ctx: JobContext) -> None:
@@ -87,6 +99,7 @@ def assemble_body(ctx: JobContext) -> None:
         PackageEntry(
             _HASHTAGS_PATH, ("\n".join(f"#{tag}" for tag in hashtags)).encode("utf-8")
         ),
+        PackageEntry(_POST_PATH, post_text(caption).encode("utf-8")),
         *_scene_entries(ctx, project_id, client, settings.minio.bucket_assets),
     ]
 

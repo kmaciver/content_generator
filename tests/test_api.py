@@ -319,6 +319,16 @@ class TestReview:
         # An edit is not an approval: it still faces the gate.
         assert body["status"] == "AWAITING_APPROVAL"
 
+    def test_cover_text_is_refused_for_other_stages(
+        self, client: FlaskClient, version: dict[str, Any]
+    ) -> None:
+        response = client.post(
+            f"/api/v1/projects/{version['project_id']}/generations",
+            json={"stage": "research", "regenerate": True, "cover_text": "hi"},
+        )
+        assert response.status_code == 400
+        assert "thumbnail" in response.get_json()["detail"]
+
     def test_comments_round_trip(
         self, client: FlaskClient, version: dict[str, Any]
     ) -> None:

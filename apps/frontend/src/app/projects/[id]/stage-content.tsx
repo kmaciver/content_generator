@@ -4,6 +4,7 @@ import type { CaptionCue, PackageFile } from "@/lib/api";
 
 import { NarrationPlayer, type VoiceSpan } from "./narration-player";
 import { RenderPlayer, type RenderMark } from "./render-player";
+import { VoiceDirectionView } from "./voice-direction";
 
 /** Rendering one stage's content (M2-13).
  *
@@ -240,6 +241,10 @@ export function StageContent({
 
   if (!content) {
     return null;
+  }
+
+  if (kind === "voice_direction") {
+    return <VoiceDirectionView content={content} />;
   }
 
   if (kind === "caption") {

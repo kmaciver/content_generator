@@ -18,6 +18,8 @@ Grouped by lifetime rather than alphabetically:
 - ``branding`` — series_character, character_reference, series_style: scoped to
   the *series*, not the project, and mutable where the artifact tables are not
   (ADR-016).
+- ``studio``   — studio_generation, studio_image: free-form images outside any
+  project or series (ADR-018).
 """
 
 from videoforge_persistence.models.artifact import Artifact, ArtifactVersion
@@ -33,6 +35,7 @@ from videoforge_persistence.models.project import VideoProject
 from videoforge_persistence.models.publishing import PublishingPackage
 from videoforge_persistence.models.review import Comment, ReviewDecision
 from videoforge_persistence.models.scene import Scene, SceneSet
+from videoforge_persistence.models.studio import StudioGeneration, StudioImage
 
 __all__ = [
     "AppUser",
@@ -52,6 +55,8 @@ __all__ = [
     "SeriesCharacter",
     "SeriesStyle",
     "StateTransition",
+    "StudioGeneration",
+    "StudioImage",
     "VideoProject",
     "Workspace",
 ]

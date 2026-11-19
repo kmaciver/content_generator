@@ -114,6 +114,12 @@ class GenerateRequest(BaseModel):
     #: five-image project and a truncated twenty-image one indistinguishable
     #: afterwards.
     max_scenes: int = Field(default=0, ge=0, le=1000)
+    #: The words to set on the cover, typed by the reviewer. Thumbnail only.
+    #: ``None`` means "use the approved caption's hook"; an empty string means
+    #: a cover with no text, which the renderer supports. 40 characters is
+    #: recommended (the editor warns past it); 100 is the hard ceiling
+    #: (``videoforge_domain.post_copy.MAX_HUMAN_HOOK_CHARACTERS``).
+    cover_text: str | None = Field(default=None, max_length=100)
 
 
 class ReviewRequest(BaseModel):

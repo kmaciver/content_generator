@@ -59,10 +59,13 @@ def world(uow: UnitOfWork) -> dict[str, str]:
         ("script", ArtifactState.APPROVED),
         ("scene_set", ArtifactState.APPROVED),
         ("prompt", ArtifactState.APPROVED),
+        ("voice_direction", ArtifactState.APPROVED),
         ("image", ArtifactState.APPROVED),
         ("voice", ArtifactState.AWAITING_APPROVAL),
     ):
-        artifact_id = f"01AR{kind[:6].upper()}".ljust(26, "0")
+        # Letters only: `voice_direction`[:6] and `voice`[:6] would otherwise
+        # differ by an underscore, which is not a ULID character.
+        artifact_id = f"01AR{kind.replace('_', '')[:7].upper()}".ljust(26, "0")
         session.execute(
             sa.text(
                 "INSERT INTO artifact (id, project_id, kind, state)"
@@ -86,9 +89,9 @@ class TestCascadeStaleness:
         self, uow: UnitOfWork, world: dict[str, str]
     ) -> None:
         marked = cascade_staleness(uow, world["project"], ArtifactKind.SCRIPT)
-        assert marked == 4  # scene_set, prompt, image, voice
+        assert marked == 5  # scene_set, prompt, voice_direction, image, voice
 
-        for kind in ("scene_set", "prompt", "image", "voice"):
+        for kind in ("scene_set", "prompt", "voice_direction", "image", "voice"):
             assert _stale(uow.session, world[kind]) is not None, kind
 
     def test_the_approved_artifact_is_not_stale(

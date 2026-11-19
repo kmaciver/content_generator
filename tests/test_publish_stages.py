@@ -76,6 +76,9 @@ def _run(
     sessions: sessionmaker[Session],
     project_id: str,
     kind: ArtifactKind,
+    *,
+    regenerate: bool = False,
+    input_extra: dict[str, Any] | None = None,
 ) -> None:
     """Dispatch and execute one stage, through the real job service."""
     import importlib
@@ -92,7 +95,13 @@ def _run(
     with unit_of_work(sessions) as uow:
         job_id = (
             JobService(uow, RecordingDispatcher())
-            .request(project_id=project_id, kind=kind, spec=spec)
+            .request(
+                project_id=project_id,
+                kind=kind,
+                spec=spec,
+                regenerate=regenerate,
+                input_extra=input_extra,
+            )
             .job.id
         )
     monkeypatch.setattr(worker_db, "get_session_factory", lambda: sessions)
@@ -236,6 +245,58 @@ class TestCaption:
             assert not tag.startswith("#")
             assert tag.isalnum() or "_" in tag
 
+    def test_a_human_edit_is_stored_and_approved_exactly_as_typed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        rendered: str,
+    ) -> None:
+        """The reported bug: an edited caption kept the model's ``preview``,
+        so the review screen still showed the old opening line. Hook and
+        hashtags are editable too, with the reviewer's casing kept."""
+        _run(monkeypatch, sessions, rendered, ArtifactKind.CAPTION)
+        before = _content(sessions, rendered, ArtifactKind.CAPTION)
+
+        with unit_of_work(sessions) as uow:
+            artifact = uow.artifacts.find(rendered, ArtifactKind.CAPTION)
+            assert artifact is not None
+            outcome = ReviewService(uow).edit(
+                artifact.id,
+                {
+                    **before,
+                    "hook": "My own hook",
+                    "caption": "My own words, nothing else.",
+                    "hashtags": ["#EducacaoFinanceira", "saúde"],
+                },
+            )
+            ReviewService(uow).approve(outcome.version.id)
+
+        after = _content(sessions, rendered, ArtifactKind.CAPTION)
+        assert after["hook"] == "My own hook"
+        assert after["caption"] == "My own words, nothing else."
+        assert after["preview"] == "My own words, nothing else."
+        assert after["hashtags"] == ["EducacaoFinanceira", "saúde"]
+
+    def test_an_edit_over_a_limit_is_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        rendered: str,
+    ) -> None:
+        from videoforge_domain.post_copy import InvalidCopyError
+
+        _run(monkeypatch, sessions, rendered, ArtifactKind.CAPTION)
+        before = _content(sessions, rendered, ArtifactKind.CAPTION)
+        with (
+            pytest.raises(InvalidCopyError, match="dental-care"),
+            unit_of_work(sessions) as uow,
+        ):
+            artifact = uow.artifacts.find(rendered, ArtifactKind.CAPTION)
+            assert artifact is not None
+            ReviewService(uow).edit(
+                artifact.id, {**before, "hashtags": ["dental-care"]}
+            )
+
     def test_it_refuses_before_the_render_is_approved(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -317,6 +378,42 @@ class TestThumbnail:
 
         _run(monkeypatch, sessions, captioned, ArtifactKind.THUMBNAIL)
         assert _meta(sessions, captioned, ArtifactKind.THUMBNAIL)["hook"] == hook
+
+    def test_a_reviewer_can_type_the_cover_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        captioned: str,
+    ) -> None:
+        """Editing the cover re-renders it with typed words, without touching
+        the approved caption."""
+        _run(monkeypatch, sessions, captioned, ArtifactKind.THUMBNAIL)
+        _run(
+            monkeypatch,
+            sessions,
+            captioned,
+            ArtifactKind.THUMBNAIL,
+            regenerate=True,
+            input_extra={"cover_text": "Read this first"},
+        )
+        meta = _meta(sessions, captioned, ArtifactKind.THUMBNAIL)
+        assert meta["hook"] == "Read this first"
+        assert meta["text_source"] == "reviewer"
+        assert _content(sessions, captioned, ArtifactKind.CAPTION)["hook"] != (
+            "Read this first"
+        )
+
+    def test_without_typed_text_it_uses_the_caption_hook(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        captioned: str,
+    ) -> None:
+        _run(monkeypatch, sessions, captioned, ArtifactKind.THUMBNAIL)
+        assert (
+            _meta(sessions, captioned, ArtifactKind.THUMBNAIL)["text_source"]
+            == "caption"
+        )
 
     def test_it_costs_nothing(
         self,
@@ -424,6 +521,21 @@ class TestPackage:
             assert zf.read("caption.txt").decode() == caption["caption"]
             tags = zf.read("hashtags.txt").decode().split()
         assert tags == [f"#{tag}" for tag in caption["hashtags"]]
+
+    def test_post_txt_is_the_whole_caption_box_in_one_paste(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sessions: sessionmaker[Session],
+        packaged: str,
+    ) -> None:
+        """Caption, a blank line, then every hashtag on one line."""
+        caption = _content(sessions, packaged, ArtifactKind.CAPTION)
+        _run(monkeypatch, sessions, packaged, ArtifactKind.PACKAGE)
+
+        with self._archive(sessions, packaged) as zf:
+            post = zf.read("post.txt").decode()
+        hashtag_line = " ".join(f"#{tag}" for tag in caption["hashtags"])
+        assert post == f"{caption['caption'].strip()}\n\n{hashtag_line}\n"
 
     def test_the_manifest_verifies_the_archive(
         self,

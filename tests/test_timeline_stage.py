@@ -32,6 +32,7 @@ from videoforge_shared.tasks import (
     SCENES_GENERATE,
     SCRIPT_GENERATE,
     TIMELINE_COMPILE,
+    VOICE_DIRECTION_GENERATE,
     VOICE_GENERATE,
 )
 
@@ -43,6 +44,11 @@ _BODIES = {
     ArtifactKind.SCENE_SET: ("scenes", "scenes_body", SCENES_GENERATE),
     ArtifactKind.PROMPT: ("prompts_stage", "prompts_body", PROMPTS_GENERATE),
     ArtifactKind.IMAGE: ("images", "images_body", IMAGES_GENERATE),
+    ArtifactKind.VOICE_DIRECTION: (
+        "voice_direction",
+        "voice_direction_body",
+        VOICE_DIRECTION_GENERATE,
+    ),
     ArtifactKind.VOICE: ("voice", "voice_body", VOICE_GENERATE),
     ArtifactKind.TIMELINE: ("timeline_stage", "compile_body", TIMELINE_COMPILE),
 }
@@ -222,6 +228,7 @@ def ready(
         ArtifactKind.SCRIPT,
         ArtifactKind.SCENE_SET,
         ArtifactKind.PROMPT,
+        ArtifactKind.VOICE_DIRECTION,
     ):
         _run(monkeypatch, sessions, project, kind)
         _approve(sessions, project, kind)

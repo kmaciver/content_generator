@@ -32,6 +32,7 @@ from videoforge_persistence.repositories import (
     ReviewRepository,
     SceneRepository,
     SeriesRepository,
+    StudioRepository,
     WorkspaceRepository,
 )
 
@@ -77,6 +78,10 @@ class UnitOfWork:
     @cached_property
     def scenes(self) -> SceneRepository:
         return SceneRepository(self.session)
+
+    @cached_property
+    def studio(self) -> StudioRepository:
+        return StudioRepository(self.session)
 
     @cached_property
     def branding(self) -> BrandingRepository:

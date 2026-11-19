@@ -70,6 +70,11 @@ class TestNamingConvention:
             # artifact_version extension like `scene_set`: a package is
             # content, so rebuilding one produces a new version and a new row.
             "publishing_package",
+            # ADR-018 — Image Studio: free-form images outside any project or
+            # series. Not artifacts, for branding's reason plus one: a studio
+            # image has no FSM, review or pipeline position to carry.
+            "studio_generation",
+            "studio_image",
         }
 
 

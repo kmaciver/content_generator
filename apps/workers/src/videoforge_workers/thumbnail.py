@@ -48,7 +48,14 @@ def thumbnail_body(ctx: JobContext) -> None:
     project_id = artifact.project_id
 
     caption = require_approved_content(ctx, project_id, ArtifactKind.CAPTION)
-    hook = str(caption.get("hook") or "").strip()
+    # A reviewer may type the cover's words directly (the thumbnail editor);
+    # otherwise the cover carries the approved caption's hook. Read from the
+    # job's input snapshot, so the version records which one it used.
+    typed = ctx.input.get("cover_text")
+    if isinstance(typed, str):
+        hook, text_source = typed.strip(), "reviewer"
+    else:
+        hook, text_source = str(caption.get("hook") or "").strip(), "caption"
 
     scene_id, storage_key = _source_frame(ctx, project_id)
     settings = load_worker_settings()
@@ -79,6 +86,7 @@ def thumbnail_body(ctx: JobContext) -> None:
         meta={
             "mime_type": "image/png",
             "hook": hook,
+            "text_source": text_source,
             # Which scene the cover came from, so the review screen can say so
             # and a reviewer asking for a different one knows what they have.
             "scene_id": scene_id,

@@ -33,7 +33,7 @@ import logging
 from dataclasses import dataclass
 
 from videoforge_persistence.models import SeriesCharacter, SeriesStyle
-from videoforge_persistence.projection import get_pipeline
+from videoforge_persistence.projection import get_pipeline, live_artifacts
 from videoforge_persistence.uow import UnitOfWork
 from videoforge_shared.enums import ArtifactKind, ArtifactState
 
@@ -107,7 +107,7 @@ def _check_pipeline(uow: UnitOfWork, project_id: str, kind: ArtifactKind) -> Non
         return
 
     worst: dict[ArtifactKind, ArtifactState] = {}
-    for artifact in uow.artifacts.for_project(project_id):
+    for artifact in live_artifacts(uow, project_id):
         artifact_kind = ArtifactKind(artifact.kind)
         state = ArtifactState(artifact.state)
         current = worst.get(artifact_kind)

@@ -16,16 +16,29 @@ export default function Home() {
         </p>
       </header>
 
-      <Link
-        href="/projects"
-        className="self-start rounded-md px-4 py-2 text-sm font-medium"
-        style={{
-          border: "1px solid var(--color-border-subtle)",
-          color: "var(--color-ink)",
-        }}
-      >
-        Projects →
-      </Link>
+      <nav className="flex flex-wrap gap-3">
+        <Link
+          href="/projects"
+          className="rounded-md px-4 py-2 text-sm font-medium"
+          style={{
+            border: "1px solid var(--color-border-subtle)",
+            color: "var(--color-ink)",
+          }}
+        >
+          Projects →
+        </Link>
+        {/* Image Studio (ADR-018): free-form images, no series or project. */}
+        <Link
+          href="/studio"
+          className="rounded-md px-4 py-2 text-sm font-medium"
+          style={{
+            border: "1px solid var(--color-border-subtle)",
+            color: "var(--color-ink)",
+          }}
+        >
+          Image Studio →
+        </Link>
+      </nav>
 
       <HealthPanel />
     </main>

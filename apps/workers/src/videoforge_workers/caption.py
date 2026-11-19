@@ -25,9 +25,16 @@ a *product* claim with a reason attached — see the constants.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
+from videoforge_domain.post_copy import (
+    MAX_CAPTION_CHARACTERS,
+    MAX_HASHTAGS,
+    MAX_HOOK_CHARACTERS,
+    PREVIEW_CHARACTERS,
+    preview_of,
+)
+from videoforge_domain.post_copy import TAG_DISALLOWED as _TAG_ALLOWED
 from videoforge_prompts import render
 from videoforge_shared.enums import ArtifactKind
 from videoforge_shared.tasks import CAPTION_GENERATE
@@ -42,30 +49,39 @@ from videoforge_workers.stages import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["CAPTION_TEMPLATE", "caption_body", "generate_caption", "normalise"]
+__all__ = [
+    "CAPTION_TEMPLATE",
+    "MAX_CAPTION_CHARACTERS",
+    "MAX_HASHTAGS",
+    "MAX_HOOK_CHARACTERS",
+    "PREVIEW_CHARACTERS",
+    "caption_body",
+    "generate_caption",
+    "normalise",
+]
 
 CAPTION_TEMPLATE = "caption"
 
 #: Instagram's hard caption limit. A caption over it is rejected on posting, so
 #: this is the one bound here that is a platform fact rather than a judgement.
-MAX_CAPTION_CHARACTERS = 2_200
+# (defined in videoforge_domain.post_copy, shared with human edits)
 
 #: What shows before the "more" link. Not enforced — truncating here would cut
 #: a sentence in half — but the prompt is written around it and the stage logs
 #: when the first sentence overruns, because that is a copy problem a reviewer
 #: should see rather than a validation failure.
-PREVIEW_CHARACTERS = 125
+# (defined in videoforge_domain.post_copy, shared with human edits)
 
 #: Instagram permits 30. Eight is the ceiling, and the reason is not the limit:
 #: past roughly ten, tags stop being discovery and start being a signal
 #: platforms read as spam. Extra tags are dropped rather than failing the
 #: stage — the copy is fine, the model was just enthusiastic.
-MAX_HASHTAGS = 8
+# (defined in videoforge_domain.post_copy, shared with human edits)
 
 #: The cover line (M5-02 typesets it). Six words at thumbnail size is already
 #: optimistic; 40 characters is the width the card renderer can set large
 #: enough to read on a phone.
-MAX_HOOK_CHARACTERS = 40
+# (defined in videoforge_domain.post_copy, shared with human edits)
 
 _RESPONSE_SCHEMA = {
     "type": "object",
@@ -89,7 +105,7 @@ _RESPONSE_SCHEMA = {
 #: fall back to a broader tag; it invents an empty one. Python's ``\w`` is
 #: Unicode-aware for ``str`` patterns, so this now keeps letters in any script
 #: and still drops the punctuation that really does end a tag.
-_TAG_ALLOWED = re.compile(r"\W", re.UNICODE)
+# (defined in videoforge_domain.post_copy, shared with human edits)
 
 
 def caption_body(ctx: JobContext) -> None:
@@ -163,7 +179,7 @@ def normalise(raw: dict[str, Any], *, fallback_hook: str) -> dict[str, Any]:
         "hashtags": _hashtags(raw.get("hashtags")),
         # Stored so the review screen can show what a scroller sees before the
         # "more" link, without reimplementing the rule in TypeScript.
-        "preview": caption[:PREVIEW_CHARACTERS],
+        "preview": preview_of(caption),
     }
 
 

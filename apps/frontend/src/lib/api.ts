@@ -346,6 +346,70 @@ export class ApiError extends Error {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// Image Studio (ADR-018) — free-form images outside any project or series.
+// --------------------------------------------------------------------------- //
+
+export interface StudioModelOption {
+  id: string;
+  label: string;
+  description: string;
+  /** Decimal string, USD. An estimate — the pricing table marks it so. */
+  price_per_image: string;
+}
+
+/** What the form may offer. Served by the API so the choices and the
+ * validation that enforces them come from one place. */
+export interface StudioOptions {
+  models: StudioModelOption[];
+  aspect_ratios: string[];
+  max_count: number;
+  max_references: number;
+  max_reference_bytes: number;
+  reference_mime_types: string[];
+}
+
+export type StudioStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+
+export interface StudioImage {
+  id: string;
+  index: number;
+  storage_key: string;
+  mime_type: string;
+  width: number;
+  height: number;
+  asset_url: string;
+}
+
+export interface StudioGeneration {
+  id: string;
+  prompt: string;
+  model: string;
+  aspect_ratio: string;
+  count: number;
+  references: string[];
+  reference_urls: string[];
+  status: StudioStatus;
+  /** The provider's own message when it failed — a safety block reads very
+   * differently from a timeout, and the person needs to know which. */
+  error: string | null;
+  created_at: string;
+  images: StudioImage[];
+}
+
+export interface StudioReference {
+  storage_key: string;
+  asset_url: string;
+}
+
+export interface CreateStudioGeneration {
+  prompt: string;
+  model: string;
+  aspect_ratio: string;
+  count: number;
+  references: string[];
+}
+
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api/bff${path}`, {
     ...init,
@@ -360,6 +424,23 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   // `Unexpected end of JSON input` — which would surface as a parse error on a
   // request that succeeded. Checked before parsing rather than caught after,
   // so a genuinely malformed body still fails loudly.
+  if (
+    response.status !== 204 &&
+    response.headers.get("content-length") !== "0" &&
+    !(response.headers.get("content-type") ?? "").includes("json")
+  ) {
+    // Not from the API: nginx's own HTML error page while the backend is
+    // restarting, typically. Parsing it surfaced as "Unexpected token '<' …
+    // is not valid JSON", which names the symptom and hides the status.
+    throw new ApiError({
+      title: "Server unavailable",
+      status: response.status,
+      detail:
+        response.status >= 500
+          ? `The server is unavailable (HTTP ${response.status}). It may be restarting — wait a few seconds and try again.`
+          : `Unexpected response from the server (HTTP ${response.status}).`,
+    });
+  }
   const payload =
     response.status === 204 || response.headers.get("content-length") === "0"
       ? null
@@ -411,6 +492,9 @@ export const api = {
     stage: string,
     regenerate = false,
     sceneId?: string,
+    /** Thumbnail only: the words to set on the cover instead of the
+     * caption's hook. */
+    coverText?: string,
   ) =>
     call<{ job_id: string; created: boolean }>(
       `/projects/${projectId}/generations`,
@@ -423,6 +507,7 @@ export const api = {
           stage,
           regenerate,
           ...(sceneId ? { scene_id: sceneId } : {}),
+          ...(coverText !== undefined ? { cover_text: coverText } : {}),
         }),
       },
     ),
@@ -551,4 +636,25 @@ export const api = {
     call<{ items: { id: string; body: string; created_at: string }[] }>(
       `/artifact-versions/${versionId}/comments`,
     ),
+
+  getStudioOptions: () => call<StudioOptions>("/studio/options"),
+
+  listStudioGenerations: (before?: string) =>
+    call<{ items: StudioGeneration[]; next_cursor: string | null }>(
+      `/studio/generations${before ? `?before=${encodeURIComponent(before)}` : ""}`,
+    ),
+
+  createStudioGeneration: (body: CreateStudioGeneration) =>
+    call<{ job_id: string; generation: StudioGeneration }>(
+      "/studio/generations",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  /** Base64 in JSON rather than multipart: the BFF forwards every body as
+   * JSON text, and one transport beats a second proxy path for a few MB. */
+  uploadStudioReference: (mimeType: string, dataBase64: string) =>
+    call<StudioReference>("/studio/references", {
+      method: "POST",
+      body: JSON.stringify({ mime_type: mimeType, data_base64: dataBase64 }),
+    }),
 };

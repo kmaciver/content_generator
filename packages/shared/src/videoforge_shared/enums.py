@@ -47,6 +47,13 @@ class ArtifactKind(StrEnum):
     SCENE_SET = "scene_set"
     SCENE = "scene"
     PROMPT = "prompt"
+    #: ADR-019. Emotion tags for ``eleven_v3``, layered over the approved scene
+    #: narration as (word, tag) positions. Its own artifact rather than a field
+    #: on ``scene``: scenes are immutable, so a tag edited *into* a scene would
+    #: be a new scene set — and with it every image regenerated, for a change
+    #: only the voice can hear. Here, editing a tag invalidates the narration
+    #: and nothing else.
+    VOICE_DIRECTION = "voice_direction"
     IMAGE = "image"
     VOICE = "voice"
     TIMELINE = "timeline"

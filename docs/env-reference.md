@@ -108,8 +108,10 @@ Per-capability: `PROVIDERS__LLM__{ADAPTER,MODEL,TIMEOUT_S}`,
 > narration and captions Portuguese and sends ElevenLabs `language_code=pt`,
 > which tells the model what language the *text* is. It does not make an
 > English voice sound Brazilian — pick a Brazilian voice from the ElevenLabs
-> library and put its id here. The default model, `eleven_turbo_v2_5`, is
-> multilingual and needs no change.
+> library and put its id here. The default model, `eleven_v3` (ADR-019, chosen
+> because it performs emotion tags), is multilingual and needs no change. Not
+> every library voice performs tags equally well on v3. Listen to the first
+> narration before approving a voice for a series.
 
 > `PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES` (default `1`) is M3-01's capability
 > gate, and it fails at **configuration time** (ADR-016). An image provider that
