@@ -88,6 +88,12 @@ tag stales the narration and nothing else.
   shows which path it took.
 - `voice` cannot run until a direction is approved, so even a video with no tags
   needs one extra approval. "Approve remaining" and series auto-approval cover it.
+- `eleven_v3` reads about 20% slower than turbo (measured on one 157-word
+  Portuguese script: 45.7 s → 54.8 s of speech; the four tags added only
+  ~1.7 s of pauses). A probe of `voice_settings.speed` on v3 gave inconsistent
+  results (1.1 → 89%, 1.2 → 92%, and 1.3 was accepted), so pace is set after
+  synthesis instead: `PROVIDERS__VOICE__TEMPO` runs ffmpeg `atempo` and scales
+  the alignment by the same factor before anything is stored.
 - `eleven_v3` costs more per character than `eleven_turbo_v2_5` and has higher
   latency. `_PER_CHARACTER_USD` carries a placeholder like the other entries.
 - Approving a new scene set stales the direction, and the voice stage refuses a

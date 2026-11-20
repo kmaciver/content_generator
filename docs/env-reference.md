@@ -101,7 +101,17 @@ taking out the broker along with the cache.
 
 Per-capability: `PROVIDERS__LLM__{ADAPTER,MODEL,TIMEOUT_S}`,
 `PROVIDERS__IMAGE__{ADAPTER,MODEL,MIN_REFERENCE_IMAGES}`,
-`PROVIDERS__VOICE__{ADAPTER,VOICE_ID}`.
+`PROVIDERS__VOICE__{ADAPTER,VOICE_ID,TEMPO}`.
+
+> **`PROVIDERS__VOICE__TEMPO`** (default `1.0`, allowed `0.8`–`1.3`) speeds
+> the narration up after synthesis with ffmpeg `atempo`, keeping the pitch.
+> Word timings, scene spans and captions are scaled to match, so nothing
+> downstream changes. `eleven_v3` reads about 20% slower than the turbo model
+> did (57 s → 68 s on the same 157-word script), and v3 gave no consistent
+> response to ElevenLabs' own `speed` setting, so this is applied here instead.
+> `1.15`–`1.2` brings v3 back to roughly turbo's pace. It applies to the next
+> voice generation; existing voice versions keep the speed they were made at
+> (`meta.tempo`).
 
 > **`PROVIDERS__VOICE__VOICE_ID` must be a voice that speaks
 > `CONTENT_LANGUAGE`.** Setting `CONTENT_LANGUAGE=pt-BR` makes the script,
@@ -196,6 +206,7 @@ PROVIDERS__IMAGE__MODEL=
 PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES=1
 PROVIDERS__VOICE__ADAPTER=mock
 PROVIDERS__VOICE__VOICE_ID=
+PROVIDERS__VOICE__TEMPO=1.0
 
 # Worker containers only -- never the API, frontend, or nginx.
 OPENAI_API_KEY=

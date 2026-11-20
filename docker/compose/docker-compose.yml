@@ -90,6 +90,9 @@ x-provider-secrets: &provider-secrets
   # nothing.
   PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES: "${PROVIDERS__IMAGE__MIN_REFERENCE_IMAGES:-1}"
   PROVIDERS__VOICE__VOICE_ID: "${PROVIDERS__VOICE__VOICE_ID:-}"
+  # Narration playback speed (ADR-019 consequences). Forwarded for the same
+  # reason as the lines above; 1.0 is the code default and leaves audio as-is.
+  PROVIDERS__VOICE__TEMPO: "${PROVIDERS__VOICE__TEMPO:-1.0}"
   OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
   ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY:-}"

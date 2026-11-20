@@ -266,6 +266,13 @@ class VoiceProviderConfig(BaseModel):
 
     adapter: str = "mock"
     voice_id: str = ""
+    #: Playback speed applied to the narration *after* synthesis (ffmpeg
+    #: ``atempo``, pitch preserved), with the word timings scaled to match.
+    #: 1.0 leaves the provider's audio untouched. Exists because ``eleven_v3``
+    #: reads ~20% slower than turbo did (measured 2026-11-18: 45.7 s → 54.8 s
+    #: of speech for the same 157 words) and a probe could not show it honours
+    #: ``voice_settings.speed``. Bounded where speech still sounds natural.
+    tempo: float = Field(default=1.0, ge=0.8, le=1.3)
 
 
 class ProviderSettings(BaseSettings):

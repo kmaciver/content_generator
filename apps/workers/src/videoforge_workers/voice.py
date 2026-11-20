@@ -57,6 +57,7 @@ from videoforge_workers.stages import (
     require_approved_content,
     require_budget,
 )
+from videoforge_workers.tempo import change_tempo, retime
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,19 @@ def voice_body(ctx: JobContext) -> None:
             "removed by scanning for brackets (ADR-019)",
             extra={"project_id": project_id},
         )
+    # Playback speed (PROVIDERS__VOICE__TEMPO). Applied before anything is
+    # stored or grouped, so the audio, its word timings and its duration are
+    # always the same recording; 1.0 keeps the provider's bytes untouched.
+    tempo = settings.providers.voice.tempo
+    audio, mime_type, duration_ms = result.audio, result.mime_type, result.duration_ms
+    if tempo != 1.0:
+        if mime_type != "audio/mpeg":
+            raise RuntimeError(
+                f"voice tempo needs MP3 narration, the provider returned {mime_type}"
+            )
+        audio = change_tempo(result.audio, tempo)
+        starts, ends = retime(starts, tempo), retime(ends, tempo)
+        duration_ms = round(result.duration_ms / tempo)
     words = words_from_characters(characters, starts, ends)
     spans = scene_spans(words, narrations)
 
@@ -153,8 +167,8 @@ def voice_body(ctx: JobContext) -> None:
 
     stored = storage().put_bytes(
         settings.minio.bucket_assets,
-        result.audio,
-        f"{project_id}-narration{_extension(result.mime_type)}",
+        audio,
+        f"{project_id}-narration{_extension(mime_type)}",
     )
 
     complete_stored_generation(
@@ -166,8 +180,11 @@ def voice_body(ctx: JobContext) -> None:
         prompt_ref="voice@1",
         operation="voice.synthesise",
         meta={
-            "mime_type": result.mime_type,
-            "duration_ms": result.duration_ms,
+            "mime_type": mime_type,
+            "duration_ms": duration_ms,
+            # What speed the stored audio plays at relative to the provider's
+            # output; the timings above are already scaled by it.
+            "tempo": tempo,
             "word_count": len(words),
             "scene_count": len(scenes),
             # ADR-019. How many tags were performed, and how they were taken
@@ -204,7 +221,8 @@ def voice_body(ctx: JobContext) -> None:
         "narration generated",
         extra={
             "project_id": project_id,
-            "duration_ms": result.duration_ms,
+            "duration_ms": duration_ms,
+            "tempo": tempo,
             "words": len(words),
             "scenes": len(scenes),
         },
